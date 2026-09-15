@@ -2,7 +2,7 @@
 .venv/
 venv/
 *-venv/
-Lego-venv/
+.venv1/
 
 # Python cache
 __pycache__/
@@ -13,3 +13,12 @@ __pycache__/
 
 # Editor
 .vscode/
+
+# Downloaded ML models
+pose_landmarker_lite.task
+gesture_recognizer.task
+hand_landmarker.task
+
+# Personal photos
+vineyard-photo.jpeg
+vineyard-photo_grayscale.jpeg
