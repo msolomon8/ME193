@@ -14,15 +14,18 @@ import argparse
 import os
 
 import cv2
+import legoeducation as le
 import numpy as np
 
-from lelib import singleMotor
+from lelib import doubleMotor
 
 
 CAMERA_INDEX = 0
 CENTER_TOLERANCE_PIXELS = 45
 MOTOR_SPEED = 20
 WINDOW_NAME = "AprilTag Parking"
+CARD_COLOR = le.LEGO_COLOR_GREEN
+CARD_SERIAL = 0997  # green connection card serial for the 0991 card
 
 
 def create_detector():
@@ -66,10 +69,10 @@ def generate_tag(tag_id, output_path, pixels):
 def centering_message(center_x, frame_width):
     horizontal_offset = center_x - frame_width / 2
     if horizontal_offset < -CENTER_TOLERANCE_PIXELS:
-        return "MOVE RIGHT", (0, 255, 255), MOTOR_SPEED
+        return "MOVE RIGHT", (0, 255, 255), MOTOR_SPEED, MOTOR_SPEED
     if horizontal_offset > CENTER_TOLERANCE_PIXELS:
-        return "MOVE LEFT", (0, 165, 255), -MOTOR_SPEED
-    return "CENTERED - STOP", (0, 220, 0), 0
+        return "MOVE LEFT", (0, 165, 255), -MOTOR_SPEED, -MOTOR_SPEED
+    return "CENTERED - STOP", (0, 220, 0), 0, 0
 
 
 def run_camera(camera_index, motor):
@@ -80,12 +83,13 @@ def run_camera(camera_index, motor):
     detector = create_detector()
     last_motor_command = None
 
-    def set_motor_speed(speed):
+    def set_motor_speed(left_speed, right_speed):
         nonlocal last_motor_command
-        if speed == last_motor_command:
+        command = (left_speed, right_speed)
+        if command == last_motor_command:
             return
-        motor.run(speed=speed)
-        last_motor_command = speed
+        motor.movement_move_tank(left_speed, right_speed, blocking=False)
+        last_motor_command = command
 
     try:
         while True:
@@ -99,16 +103,16 @@ def run_camera(camera_index, motor):
 
             message = "NO APRILTAG"
             message_color = (0, 0, 255)
-            set_motor_speed(0)
+            set_motor_speed(0, 0)
             if ids is not None:
                 cv2.aruco.drawDetectedMarkers(frame, corners, ids)
                 for index, tag_id in enumerate(ids.flatten()):
                     points = corners[index][0]
                     center_x = float(points[:, 0].mean())
-                    message, message_color, motor_speed = centering_message(
+                    message, message_color, left_speed, right_speed = centering_message(
                         center_x, frame_width
                     )
-                    set_motor_speed(motor_speed)
+                    set_motor_speed(left_speed, right_speed)
                     cv2.putText(
                         frame,
                         f"ID {tag_id}  center: {center_x:.0f}px",
@@ -139,7 +143,7 @@ def run_camera(camera_index, motor):
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
     finally:
-        set_motor_speed(0)
+        set_motor_speed(0, 0)
         capture.release()
         cv2.destroyAllWindows()
         motor.disconnect()
@@ -160,9 +164,9 @@ def main():
     if args.generate:
         generate_tag(args.tag_id, args.output, args.pixels)
     else:
-        motor = singleMotor()
-        print("Connecting to LEGO Single Motor...")
-        motor.connect(card_serial=None, card_color=None)
+        motor = doubleMotor()
+        print("Connecting to LEGO Double Motor on green 0991 card...")
+        motor.connect(card_serial=CARD_SERIAL, card_color=CARD_COLOR)
         print("Connected. Press q to stop.")
         run_camera(args.camera, motor)
 

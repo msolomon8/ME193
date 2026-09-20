@@ -1,17 +1,20 @@
-"""Center a robot on a stationary AprilTag using a smartphone camera stream.
+"""Center a robot on a stationary AprilTag using an iPhone camera on a Mac.
 
 This script is intended for a robot with:
-- a phone mounted in front of the robot, streaming video back to the laptop
-- a LEGO Double Motor on the green 0991 connection card
+- an iPhone mounted in front of the robot
+- NDI HX Camera on the iPhone
+- NDI Webcam Input on the Mac, exposing the iPhone as a Mac camera
+- a LEGO Double Motor on the green 0997 connection card
 - a stationary AprilTag in the environment
 
-Typical smartphone sources:
-- IP Webcam: http://PHONE_IP:8080/video
-- DroidCam: http://PHONE_IP:4747/mjpegfeed
-- Camo / other MJPEG/RTSP sources, if you prefer to use a different URL
+NDI camera mode:
+    python smartphone-apriltag.py --camera 1
 
-Example:
-    python smartphone-apriltag.py --stream http://192.168.1.25:8080/video
+Use the camera index that shows the iPhone feed in test-ip-webcam.py. The Mac
+must have NDI Webcam Input running and selected to the iPhone's NDI source.
+
+Optional HTTP stream mode:
+    python smartphone-apriltag.py --stream http://PHONE_IP:8080/video
     python smartphone-apriltag.py --generate --id 0
 
 The laptop does the computer vision work and then commands the robot to center
@@ -146,11 +149,20 @@ def run_stream(args, motor):
         motor.movement_move_tank(left_speed, right_speed, blocking=False)
         last_command = command
 
-    cap = cv2.VideoCapture(args.stream if args.stream else args.camera)
+    source = args.stream if args.stream else args.camera
+    if args.stream:
+        cap = cv2.VideoCapture(source)
+    else:
+        cap = cv2.VideoCapture(source, cv2.CAP_AVFOUNDATION)
     if not cap.isOpened():
         if args.stream:
             raise RuntimeError(f"Could not open smartphone video stream: {args.stream}")
-        raise RuntimeError(f"Could not open camera {args.camera}")
+        raise RuntimeError(
+            f"Could not open Mac camera {args.camera}. Start NDI Webcam Input "
+            "and select the iPhone source first."
+        )
+
+    print(f"Opened video source: {source}")
 
     try:
         while True:
@@ -243,16 +255,13 @@ def parse_args():
     parser.add_argument(
         "--stream",
         default=os.environ.get("SMARTPHONE_STREAM_URL"),
-        help=(
-            "Phone video stream URL, such as http://192.168.1.25:8080/video or "
-            "http://192.168.1.25:4747/mjpegfeed"
-        ),
+        help="Optional HTTP/MJPEG phone stream URL",
     )
     parser.add_argument(
         "--camera",
         type=int,
         default=0,
-        help="Local webcam index to use as a fallback when no stream URL is provided",
+        help="Mac camera index; use this for NDI Webcam Input",
     )
     parser.add_argument("--generate", action="store_true")
     parser.add_argument("--id", type=int, default=0, dest="tag_id")
@@ -269,7 +278,7 @@ def main():
         return
 
     motor = doubleMotor()
-    print("Connecting to LEGO Double Motor on green 0991 card...")
+    print("Connecting to LEGO Double Motor on green 0997 card...")
     motor.connect(card_serial=CARD_SERIAL, card_color=CARD_COLOR)
     print("Connected. Press q to stop.")
     print("Streaming from:", args.stream if args.stream else f"local camera {args.camera}")
