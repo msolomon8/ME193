@@ -20,7 +20,7 @@ import cv2
 import legoeducation as le
 import numpy as np
 
-from lelib import doubleMotor, singleMotor
+from lelib import doubleMotor
 
 
 CARD_COLOR = le.LEGO_COLOR_GREEN
@@ -44,25 +44,19 @@ YAW_KD = 0.002
 MAX_YAW_CORRECTION = 6
 MAX_ACCEL_PER_SEC = 30
 INVERT_RIGHT_MOTOR = True
-CAMERA_PAN_SPEED = 25
-CAMERA_MOTOR_SIGN = 1
-CAMERA_SCAN_SPEED = 3
-CAMERA_SCAN_DIRECTION = 1
-CAMERA_SCAN_ACCELERATION = 20
+# No camera pan motor -- searching/reacquiring now rotates the whole car
+# (Double Motor) in place instead of panning an independent camera motor.
+SEARCH_SPIN_YAW = 3            # slow, constant in-place spin while searching
+SEARCH_SPIN_DIRECTION_SIGN = 1  # flips which way the car spins while searching
 TAG_LOST_HOLD_SECONDS = 1.0
-CAMERA_REACQUIRE_SPEED = 3
-CAMERA_REACQUIRE_INTERVAL_SECONDS = 4.0
-CAMERA_YAW_ALIGN_SPEED = 5
-CAMERA_YAW_TOLERANCE_DEG = 5.0
-CAMERA_YAW_SIGN = 1
+REACQUIRE_SPIN_YAW = 3
+REACQUIRE_INTERVAL_SECONDS = 4.0
 WINDOW_NAME = "iPhone AprilTag"
 
 latest_frame = None
 frame_lock = threading.Lock()
 motor = None
-camera_motor = None
 motor_lock = threading.Lock()
-camera_motor_lock = threading.Lock()
 stop_event = threading.Event()
 
 
@@ -267,38 +261,9 @@ def drive_car(left_speed, right_speed, last_sent, send_threshold=1):
     return last_sent
 
 
-def send_camera_motor(speed):
-    with camera_motor_lock:
-        active_motor = camera_motor
-    if active_motor is None:
-        return False
-    active_motor.run(speed=int(round(CAMERA_MOTOR_SIGN * speed)))
-    return True
-
-
-def stop_camera_motor():
-    with camera_motor_lock:
-        active_motor = camera_motor
-    if active_motor is not None:
-        active_motor.motor_stop()
-
-
 def connect_motor():
-    global camera_motor, motor
+    global motor
     try:
-        print("Connecting to camera pan motor on green 0997 card...")
-        camera_candidate = singleMotor()
-        camera_candidate.connect(card_serial=CARD_SERIAL, card_color=CARD_COLOR)
-        camera_candidate.motor_reset_relative_position(position=0)
-        camera_candidate.motor_set_acceleration(
-            CAMERA_SCAN_ACCELERATION,
-            CAMERA_SCAN_ACCELERATION,
-            blocking=False,
-        )
-        with camera_motor_lock:
-            camera_motor = camera_candidate
-        print("Camera pan motor connected.")
-
         print("Connecting to LEGO Double Motor on green 0997 card...")
         car_candidate = doubleMotor()
         car_candidate.connect(card_serial=CARD_SERIAL, card_color=CARD_COLOR)
@@ -340,7 +305,6 @@ def preview_loop(enable_motor):
     reacquiring_camera = False
     reacquire_direction = 1
     last_reacquire_switch = time.monotonic()
-    camera_scanning = False
     last_command = None
 
     while not stop_event.is_set():
@@ -364,44 +328,44 @@ def preview_loop(enable_motor):
                 if tag_acquired:
                     if tag_lost_since is None:
                         tag_lost_since = now
-                    send_motor(0, 0)
-                    if (
-                        now - tag_lost_since >= TAG_LOST_HOLD_SECONDS
-                    ):
+                    if now - tag_lost_since >= TAG_LOST_HOLD_SECONDS:
                         reacquiring_camera = True
                     if reacquiring_camera and enable_motor:
-                        if now - last_reacquire_switch >= CAMERA_REACQUIRE_INTERVAL_SECONDS:
+                        if now - last_reacquire_switch >= REACQUIRE_INTERVAL_SECONDS:
                             reacquire_direction *= -1
                             last_reacquire_switch = now
-                        send_camera_motor(reacquire_direction * CAMERA_REACQUIRE_SPEED)
+                        command = (
+                            int(round(reacquire_direction * REACQUIRE_SPIN_YAW)),
+                            int(round(-reacquire_direction * REACQUIRE_SPIN_YAW)),
+                        )
+                        last_command = drive_car(command[0], command[1], last_command)
                         label, color = "REACQUIRING APRILTAG", (0, 200, 255)
                     else:
-                        stop_camera_motor()
-                        camera_scanning = False
+                        command = (0, 0)
+                        last_command = drive_car(0, 0, last_command)
                         label, color = "TAG LOST - CAR STOPPED", (0, 165, 255)
                 else:
-                    if enable_motor and not camera_scanning:
-                        send_camera_motor(CAMERA_SCAN_DIRECTION * CAMERA_SCAN_SPEED)
-                        camera_scanning = True
+                    if enable_motor:
+                        command = (
+                            int(round(SEARCH_SPIN_DIRECTION_SIGN * SEARCH_SPIN_YAW)),
+                            int(round(-SEARCH_SPIN_DIRECTION_SIGN * SEARCH_SPIN_YAW)),
+                        )
+                        last_command = drive_car(command[0], command[1], last_command)
+                    else:
+                        command = (0, 0)
                     label, color = "SEARCHING FOR APRILTAG", (0, 200, 255)
-                command = (0, 0)
             else:
                 points, tag_id = tag
                 tag_acquired = True
                 tag_lost_since = None
                 if reacquiring_camera:
-                    stop_camera_motor()
                     reacquiring_camera = False
                     last_reacquire_switch = time.monotonic()
-                camera_scanning = False
                 center_x = float(points[:, 0].mean())
-                if enable_motor:
-                    stop_camera_motor()
                 if camera is None:
                     camera = camera_matrix(width, height)
                 pose = estimate_pose(points, TAG_SIZE_METERS, camera, distortion)
                 if pose is None:
-                    stop_camera_motor()
                     command = (0, 0)
                     label, color = "POSE FAILED - STOPPED", (0, 165, 255)
                 else:
@@ -416,7 +380,6 @@ def preview_loop(enable_motor):
                         center_aligned = abs(center_error) <= CENTER_TOLERANCE_PIXELS
                         if yaw_aligned and center_aligned:
                             car_aligned = True
-                            stop_camera_motor()
                         else:
                             yaw_correction = yaw_pid.compute(yaw_error)
                             yaw_correction += CENTERING_KP * center_error
@@ -443,7 +406,6 @@ def preview_loop(enable_motor):
                             label = "ALIGNING CAR PARALLEL TO TAG"
                         color = (0, 200, 255)
                     else:
-                        stop_camera_motor()
                         distance_ok = abs(distance_error) <= DISTANCE_TOLERANCE_METERS
                         center_ok = abs(center_error) <= CENTER_TOLERANCE_PIXELS
                         if yaw_parked:
@@ -555,15 +517,10 @@ def main():
     finally:
         stop_event.set()
         send_motor(0, 0)
-        stop_camera_motor()
         with motor_lock:
             active_motor = motor
         if active_motor is not None:
             active_motor.disconnect()
-        with camera_motor_lock:
-            active_camera_motor = camera_motor
-        if active_camera_motor is not None:
-            active_camera_motor.disconnect()
         server.shutdown()
 
 

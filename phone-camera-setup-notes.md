@@ -109,3 +109,64 @@ https://<MAC-IP>:8444/
 ```
 
 The Mac and iPhone must be on the same Wi-Fi network. The local HTTPS certificate warning is expected; accept it so Safari can use the camera.
+
+## 2026-09-20 working notes
+
+### Current script under test
+- Active file: `updatedphone-apriltag.py`
+- The script is a browser-based iPhone camera -> Mac AprilTag controller.
+- It binds to `--host 0.0.0.0` and uses the port specified by `--port`.
+- The iPhone must open the Mac's actual local IP, not `0.0.0.0`.
+
+### Correct URL pattern
+Use the Mac's actual Wi-Fi IP on the phone, for example:
+
+```text
+https://10.243.29.88:8443/
+```
+
+Do not use `0.0.0.0` in the phone browser. `0.0.0.0` is only a bind address for the server, not a reachable client URL.
+
+### Certificate issue
+A certificate generated for an older address (`192.168.1.213`) will not match the current machine IP (`10.243.29.88`).
+
+The cert was regenerated with the correct IP:
+
+```bash
+cd /Users/miasolomon/Documents/GitHub/ME193
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout phone-camera-key.pem \
+  -out phone-camera-cert.pem \
+  -days 365 \
+  -subj "/CN=10.243.29.88" \
+  -addext "subjectAltName=IP:10.243.29.88"
+```
+
+### Run command that works
+```bash
+cd /Users/miasolomon/Documents/GitHub/ME193
+source ME193/le-venv/bin/activate
+python updatedphone-apriltag.py --https --host 0.0.0.0 --port 8443
+```
+
+### Browser symptom and root cause
+- Browser loads the page but the status changes to `Mac connection lost` after a refresh.
+- That is coming from the JavaScript fetch to `/frame` in the script.
+- The script succeeds in serving the page, but the POST from the phone camera does not reach the server reliably when:
+  - the cert is for the wrong IP,
+  - the phone is not on the same network,
+  - the URL is wrong,
+  - or Safari blocks the self-signed HTTPS certificate.
+
+### Current recommendation
+- Start the script with `--https --host 0.0.0.0 --port 8443`.
+- Open the phone browser to `https://10.243.29.88:8443/`.
+- If Safari warns about the cert, trust the certificate once.
+- Make sure the phone and Mac are on the same Wi-Fi network or a trusted local network.
+- If the browser still fails, verify the Mac IP with:
+
+```bash
+ipconfig getifaddr en0
+```
+
+This is the current status of the phone-camera setup and the troubleshooting steps from today.
