@@ -22,3 +22,6 @@ hand_landmarker.task
 # Personal photos
 vineyard-photo.jpeg
 vineyard-photo_grayscale.jpeg
+
+# Local HTTPS dev certificate/key (private key material -- never commit)
+*.pem
