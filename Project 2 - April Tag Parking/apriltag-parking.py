@@ -1,15 +1,16 @@
 """Detect an AprilTag and show simple parking guidance.
 
 Run the camera mode with:
-    ./ME193/le-venv/bin/python apriltag-parking.py
+    ../le-venv/bin/python apriltag-parking.py
 
 Generate a printable tag with:
-    ./ME193/le-venv/bin/python apriltag-parking.py --generate --id 0
+    ../le-venv/bin/python apriltag-parking.py --generate --id 0
 
     The motor moves the detected tag horizontally until it reaches the center
     line of the camera image.
 """
 
+import sys
 import argparse
 import os
 
@@ -17,6 +18,8 @@ import cv2
 import legoeducation as le
 import numpy as np
 
+# lelib.py is shared across projects and lives one folder up, in ME193/.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lelib import doubleMotor
 
 

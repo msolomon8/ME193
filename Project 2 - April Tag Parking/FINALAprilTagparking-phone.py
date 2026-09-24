@@ -1,31 +1,31 @@
 """iPhone Safari camera to Mac AprilTag preview and LEGO control.
 
-Camera is mounted RIGIDLY to the car (no independent pan/search motor).
-That's the key difference from updatedphone-apriltag.py: with a fixed
-camera, "camera-forward" and "car-forward" are always the same direction,
-so there's no hidden pan-angle offset for the steering math to get wrong.
 The iPhone opens the HTTPS page in Safari and sends camera frames to this
-Mac. The Mac preview starts immediately, even if the LEGO motor is
+Mac. The Mac preview starts immediately, even if the LEGO motors are
 disconnected. Use --test to verify the phone feed without connecting to
 the car.
 
+This is your original working double-motor parking code, unchanged,
+except for two things: (1) the log_message crash is fixed, and (2) there
+is no single motor on this car anymore, so SEARCHING now rotates the
+whole car (Double Motor) in place instead of panning a separate camera
+motor. The parking logic itself (PID + hysteresis + DivergenceGuard) is
+exactly as you had it.
+
 Search/park behavior:
-  SEARCHING - the Double Motor slowly rotates the whole car in place
-    (there is no separate camera motor to pan) until a tag is glimpsed.
-    The instant a tag appears, the car HOLDS STILL (rather than
-    continuing to spin) while it's confirmed for
-    CONFIRMATION_FRAMES_REQUIRED consecutive frames -- this is the
-    false-positive double-check, and it also keeps the tag from panning
-    back out of frame before confirmation completes. If it disappears
-    again before being confirmed, the car resumes spinning.
-  FOUND - the Double Motor drives forward/backward to reach the target
-    distance AND steers to face the tag squarely (yaw), at the same
-    time, using PID + hysteresis + DivergenceGuard, with the pose
-    readings smoothed (EMA) to avoid chasing camera noise. If the tag is
-    lost for TAG_LOST_HOLD_SECONDS, the car stops and the state goes
-    back to SEARCHING.
+  SEARCHING - the car spins continuously at a slow, constant speed (a
+    full 360-degree sweep, repeating if needed) while no tag has been
+    confirmed. A tag must be seen with a valid pose for
+    CONFIRMATION_FRAMES_REQUIRED consecutive frames before it's trusted --
+    this is the false-positive double-check. Once confirmed, the car
+    stops spinning and is NOT touched again until the tag is lost.
+  FOUND - the car drives forward/backward to center the tag AND steers to
+    face it squarely (yaw), at the same time, using PID + hysteresis +
+    DivergenceGuard. If the tag is lost for TAG_LOST_HOLD_SECONDS, the
+    car stops and the state goes back to SEARCHING (spinning resumes).
 """
 
+import sys
 import argparse
 import math
 import os
@@ -40,22 +40,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 import legoeducation as le
 import numpy as np
+# lelib.py is shared across projects and lives one folder up, in ME193/.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lelib import doubleMotor
 
 CARD_COLOR = le.LEGO_COLOR_GREEN
 CARD_SERIAL = "0997"
 TAG_SIZE_METERS = 2.025 * 0.0254
 
-TARGET_DISTANCE_METERS = 0.45
-DISTANCE_TOLERANCE_METERS = 0.03
-DRIVE_DIRECTION_SIGN = 1  # flips forward/backward driving direction
-
-CENTER_TOLERANCE_PIXELS = 35
-CENTERING_KP = 0.025  # nudges forward/backward drive to re-center the tag
-                       # horizontally (the side-facing camera means left/right
-                       # in frame is a driving-position error, not a heading
-                       # error, so this drives -- it does not turn)
-CENTERING_DIRECTION_SIGN = -1  # flips which way centering drives (fwd/back)
+CENTER_TOLERANCE_PIXELS = 5
 
 YAW_ENTER_TOLERANCE_DEG = 3.0   # must get this close to be considered "parked"
 YAW_EXIT_TOLERANCE_DEG = 6.0    # must drift this far out to resume correcting
@@ -63,37 +56,31 @@ YAW_EXIT_TOLERANCE_DEG = 6.0    # must drift this far out to resume correcting
 TARGET_YAW_DEG = 180.0  # with this file's marker_object_points, a tag
                          # squarely facing the camera reads yaw ~= 180
 
-# --- Distance PID (forward/backward) --------------------------------------
-DISTANCE_KP = 80.0
-DISTANCE_KI = 0.0
-DISTANCE_KD = 0.0
-MAX_SPEED = 12
+# --- Position PID (forward/backward) -------------------------------------
+KP = 0.10
+KI = 0.0
+KD = 0.01
+MAX_SPEED = 25
 
 # --- Yaw PID (steering, to face the tag squarely) -------------------------
 YAW_KP = -0.15
 YAW_KI = 0.0
 YAW_KD = 0.01
-MAX_YAW_CORRECTION = 6
+MAX_YAW_CORRECTION = 12
 
-MAX_ACCEL_PER_SEC = 30
+MAX_ACCEL_PER_SEC = 60
 INVERT_RIGHT_MOTOR = True
 
-# --- Searching (rotate the whole car; no camera motor) ---------------------
-SEARCH_SPIN_YAW = 3              # slow, constant in-place spin while searching
-SEARCH_SPIN_DIRECTION_SIGN = 1   # flips which way the car spins while searching
+# --- Searching (no single motor -- the car itself spins in place) ---------
+SEARCH_SPIN_SPEED = 3            # slow, constant spin while searching
 CONFIRMATION_FRAMES_REQUIRED = 5  # consecutive good frames before trusting a tag
 
 # --- Losing the tag while parked/driving ----------------------------------
 TAG_LOST_HOLD_SECONDS = 1.0  # how long to wait before giving up and re-searching
 
-# --- Pose smoothing and frame freshness ------------------------------------
-POSE_SMOOTHING_ALPHA = 0.25  # lower = smoother but slower to react to real motion
-STALE_FRAME_SECONDS = 0.3    # hold the car if the phone feed falls this far behind
-
 WINDOW_NAME = "iPhone AprilTag"
 
 latest_frame = None
-latest_frame_time = 0.0
 frame_lock = threading.Lock()
 motor = None
 motor_lock = threading.Lock()
@@ -179,10 +166,9 @@ class Handler(BaseHTTPRequestHandler):
             image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
             if image is None:
                 raise ValueError("invalid JPEG")
-            global latest_frame, latest_frame_time
+            global latest_frame
             with frame_lock:
                 latest_frame = image
-                latest_frame_time = time.monotonic()
             self.send_response(204)
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -190,7 +176,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(400)
             self.end_headers()
 
-    def log_message(self, format, *args, **kwargs):
+    def log_message(self, format, *args):
         return
 
 
@@ -228,27 +214,6 @@ class PID:
 
         output = self.kp * error + self.ki * self.integral + self.kd * derivative
         return max(-self.output_limit, min(self.output_limit, output))
-
-
-class EMA:
-    """Exponential moving average filter for a noisy measurement. Smooths
-    out per-frame pose jitter (from a low-quality/laggy camera feed) so
-    the PID controllers react to the real trend instead of chasing noise.
-    Lower alpha means more smoothing but slower to reflect real motion."""
-
-    def __init__(self, alpha):
-        self.alpha = alpha
-        self.value = None
-
-    def reset(self):
-        self.value = None
-
-    def update(self, sample):
-        if self.value is None:
-            self.value = sample
-        else:
-            self.value = self.alpha * sample + (1 - self.alpha) * self.value
-        return self.value
 
 
 class SlewLimiter:
@@ -433,13 +398,9 @@ def preview_loop(enable_motor):
         parameters,
     )
 
-    distance_pid = PID(DISTANCE_KP, DISTANCE_KI, DISTANCE_KD, MAX_SPEED)
+    position_pid = PID(KP, KI, KD, MAX_SPEED)
     yaw_pid = PID(YAW_KP, YAW_KI, YAW_KD, MAX_YAW_CORRECTION)
     yaw_guard = DivergenceGuard()
-    center_guard = DivergenceGuard(min_error_to_monitor=40.0, worsening_margin=15.0)
-    distance_error_filter = EMA(POSE_SMOOTHING_ALPHA)
-    yaw_error_filter = EMA(POSE_SMOOTHING_ALPHA)
-    center_error_filter = EMA(POSE_SMOOTHING_ALPHA)
     left_slew = SlewLimiter(MAX_ACCEL_PER_SEC)
     right_slew = SlewLimiter(MAX_ACCEL_PER_SEC)
     yaw_parked = False
@@ -452,12 +413,10 @@ def preview_loop(enable_motor):
     last_seen_tag_id = None
     tag_lost_since = None
     last_command = None
-    last_printed_label = None
 
     while not stop_event.is_set():
         with frame_lock:
             frame = None if latest_frame is None else latest_frame.copy()
-            frame_time = latest_frame_time
 
         if frame is None:
             frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -487,14 +446,10 @@ def preview_loop(enable_motor):
         debug_lines = []
         command = (0, 0)
 
-        # --- SEARCHING: rotate the whole car slowly in place (there is no
-        # separate camera motor). The spin holds still the instant a tag is
-        # glimpsed so it doesn't spin back out of frame before enough
-        # confirmations accumulate, and resumes if the tag disappears again
-        # before it's fully confirmed.
+        # --- SEARCHING: spin the car in place, require several
+        # consecutive confirmed frames before trusting a detection.
         if state == "SEARCHING":
             tag_detected = tag is not None and pose is not None
-
             if tag_detected:
                 if tag_id == last_seen_tag_id:
                     confirmations += 1
@@ -508,44 +463,34 @@ def preview_loop(enable_motor):
             if confirmations >= CONFIRMATION_FRAMES_REQUIRED:
                 state = "FOUND"
                 tag_lost_since = None
-                distance_pid.reset()
+                position_pid.reset()
                 yaw_pid.reset()
-                distance_error_filter.reset()
-                yaw_error_filter.reset()
-                center_error_filter.reset()
                 left_slew.reset()
                 right_slew.reset()
                 yaw_parked = False
-                label, color = "TAG CONFIRMED - SWITCHING TO PARK", (0, 220, 0)
+                label, color = "TAG CONFIRMED - SWITCHING TO CAR", (0, 220, 0)
+            elif tag_detected:
+                # Hold still (command stays (0, 0)) while confirming, so
+                # the car doesn't keep spinning past the tag before it
+                # locks on.
+                label, color = (
+                    f"HOLDING - CONFIRMING ({confirmations}/{CONFIRMATION_FRAMES_REQUIRED})",
+                    (0, 200, 255),
+                )
             else:
-                if tag_detected:
-                    target_left, target_right = 0.0, 0.0
-                    label, color = (
-                        f"HOLDING - CONFIRMING ({confirmations}/{CONFIRMATION_FRAMES_REQUIRED})",
-                        (0, 200, 255),
-                    )
-                else:
-                    target_left = SEARCH_SPIN_DIRECTION_SIGN * SEARCH_SPIN_YAW
-                    target_right = -SEARCH_SPIN_DIRECTION_SIGN * SEARCH_SPIN_YAW
-                    label, color = "SEARCHING - ROTATING CAR", (0, 200, 255)
+                if enable_motor:
+                    command = (int(round(SEARCH_SPIN_SPEED)), int(round(-SEARCH_SPIN_SPEED)))
+                label, color = f"SEARCHING ({confirmations}/{CONFIRMATION_FRAMES_REQUIRED})", (0, 200, 255)
 
-                left = left_slew.step(target_left)
-                right = right_slew.step(target_right)
-                command = (int(round(left)), int(round(right)))
-
-        # --- FOUND: drive forward/backward to reach the target distance
-        # and steer to face the tag squarely, at the same time.
+        # --- FOUND: only the car's own driving moves from here on.
         elif state == "FOUND":
             if tag is None or pose is None:
                 now = time.monotonic()
                 if tag_lost_since is None:
                     tag_lost_since = now
                 send_motor(0, 0)
-                distance_pid.reset()
+                position_pid.reset()
                 yaw_pid.reset()
-                distance_error_filter.reset()
-                yaw_error_filter.reset()
-                center_error_filter.reset()
                 left_slew.reset()
                 right_slew.reset()
 
@@ -562,14 +507,13 @@ def preview_loop(enable_motor):
                 rotation, translation = pose
 
                 center_x = float(points[:, 0].mean())
+                center_y = float(points[:, 1].mean())
                 distance = float(translation[2][0])
-                distance_error = distance_error_filter.update(distance - TARGET_DISTANCE_METERS)
-                center_error = center_error_filter.update(center_x - width / 2)
+                position_error = center_x - width / 2
                 yaw_raw = yaw_from_rotation(rotation)
-                yaw_error = yaw_error_filter.update(angle_difference(yaw_raw, TARGET_YAW_DEG))
+                yaw_error = angle_difference(yaw_raw, TARGET_YAW_DEG)
 
-                distance_ok = abs(distance_error) <= DISTANCE_TOLERANCE_METERS
-                center_ok = abs(center_error) <= CENTER_TOLERANCE_PIXELS
+                position_ok = abs(position_error) <= CENTER_TOLERANCE_PIXELS
 
                 # Hysteresis: once parked, must exceed the wider EXIT
                 # threshold before correction resumes -- stops noise at
@@ -580,11 +524,11 @@ def preview_loop(enable_motor):
                     yaw_parked = abs(yaw_error) <= YAW_ENTER_TOLERANCE_DEG
                 yaw_ok = yaw_parked
 
-                if distance_ok:
+                if position_ok:
                     translation_speed = 0.0
-                    distance_pid.reset()
+                    position_pid.reset()
                 else:
-                    translation_speed = DRIVE_DIRECTION_SIGN * distance_pid.compute(distance_error)
+                    translation_speed = position_pid.compute(position_error)
 
                 if yaw_ok:
                     yaw_correction = 0.0
@@ -592,19 +536,6 @@ def preview_loop(enable_motor):
                 else:
                     yaw_guard.record(yaw_error)
                     yaw_correction = yaw_guard.sign * yaw_pid.compute(yaw_error)
-                yaw_correction = max(-MAX_YAW_CORRECTION, min(MAX_YAW_CORRECTION, yaw_correction))
-
-                # The camera looks out the SIDE of the car, not out the front.
-                # So a tag that's off-center left/right in the image needs to
-                # be fixed by driving forward/backward along the car's own
-                # lane (which slides the view sideways past the tag), not by
-                # turning -- turning only fixes heading (yaw), not position.
-                if not center_ok:
-                    center_guard.record(center_error)
-                    translation_speed += (
-                        center_guard.sign * CENTERING_DIRECTION_SIGN * CENTERING_KP * center_error
-                    )
-                translation_speed = max(-MAX_SPEED, min(MAX_SPEED, translation_speed))
 
                 target_left = translation_speed + yaw_correction
                 target_right = translation_speed - yaw_correction
@@ -612,12 +543,10 @@ def preview_loop(enable_motor):
                 right = right_slew.step(target_right)
                 command = (int(round(left)), int(round(right)))
 
-                if distance_ok and yaw_ok and center_ok:
+                if position_ok and yaw_ok:
                     label, color = "STOP - PARKED", (0, 220, 0)
-                elif distance_ok and not center_ok:
-                    label, color = "CENTERING TAG", (255, 200, 0)
-                elif distance_ok:
-                    label, color = "ALIGNING YAW", (255, 200, 0)
+                elif position_ok:
+                    label, color = "ALIGNING", (255, 200, 0)
                 elif translation_speed > 0:
                     label, color = "DRIVE FORWARD", (0, 255, 255)
                 elif translation_speed < 0:
@@ -627,26 +556,20 @@ def preview_loop(enable_motor):
 
                 debug_lines = [
                     f"ID {tag_id}",
-                    f"dist: {distance:.2f} m err: {distance_error:+.2f}",
-                    f"center_err: {center_error:+.0f} px",
+                    f"dist: {distance:.2f} m",
+                    f"pos_err: {position_error:+.0f} px",
                     f"yaw_raw: {yaw_raw:+.1f}",
                     f"yaw_err: {yaw_error:+.1f}",
                     f"yaw_sign: {yaw_guard.sign:+d}",
+                    f"centroid: ({center_x:.0f}, {center_y:.0f})",
                 ]
 
-                cv2.aruco.drawDetectedMarkers(
-                    frame,
-                    [points.reshape(1, 4, 2)],
-                    np.array([[tag_id]], dtype=np.int32),
+                # Required by the assignment: red outline around the tag.
+                cv2.polylines(
+                    frame, [points.astype(np.int32)], isClosed=True,
+                    color=(0, 0, 255), thickness=2,
                 )
-
-        if time.monotonic() - frame_time > STALE_FRAME_SECONDS:
-            command = (0, 0)
-            label, color = "STALE FEED - HOLDING", (0, 165, 255)
-
-        if label != last_printed_label:
-            print(f"[STATE] {label} (command={command})")
-            last_printed_label = label
+                cv2.circle(frame, (int(center_x), int(center_y)), 5, (0, 0, 255), -1)
 
         if enable_motor and command != last_command:
             if send_motor(*command):
@@ -674,6 +597,7 @@ def local_ip():
     except OSError:
         return "<MAC-IP>"
 
+
 def prevent_sleep():
     """Keep the Mac awake for as long as this process runs. macOS suspends
     the network stack on sleep, which kills the HTTPS server and shows up
@@ -685,6 +609,7 @@ def prevent_sleep():
         return subprocess.Popen(["caffeinate", "-dis", "-w", str(os.getpid())])
     except OSError:
         return None
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

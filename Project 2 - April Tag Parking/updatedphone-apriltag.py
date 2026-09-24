@@ -20,6 +20,7 @@ Search/park behavior:
     SEARCHING (Single Motor resumes spinning).
 """
 
+import sys
 import argparse
 import math
 import os
@@ -34,6 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 import legoeducation as le
 import numpy as np
+# lelib.py is shared across projects and lives one folder up, in ME193/.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lelib import doubleMotor, singleMotor
 
 CARD_COLOR = le.LEGO_COLOR_GREEN

@@ -34,7 +34,7 @@ class MQTTClient:
         self._client.subscribe(topic)
 
     def publish(self, topic, payload):
-        self._client.publish(topic, payload)
+        return self._client.publish(topic, payload)
 
     def __enter__(self):
         return self.connect()

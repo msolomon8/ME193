@@ -53,8 +53,8 @@ The green connection card serial used in the latest scripts was updated to the 0
 
 ## Commands used during setup
 ```bash
-cd /Users/miasolomon/Documents/GitHub/ME193
-source ME193/le-venv/bin/activate
+cd "/Users/miasolomon/Documents/GitHub/ME193/Project 2 - April Tag Parking"
+source ../le-venv/bin/activate
 python phone-browser-apriltag.py --help
 python phone-browser-apriltag.py --stream http://10.243.41.54:8080/video
 ```
@@ -97,8 +97,8 @@ The single motor is not used to park the car. It only scans or reacquires the Ap
 From the project root on the Mac:
 
 ```bash
-cd /Users/miasolomon/Documents/GitHub/ME193
-source ME193/le-venv/bin/activate
+cd "/Users/miasolomon/Documents/GitHub/ME193/Project 2 - April Tag Parking"
+source ../le-venv/bin/activate
 python iphone-apriltag.py --https --host 0.0.0.0 --port 8444
 ```
 
@@ -133,7 +133,7 @@ A certificate generated for an older address (`192.168.1.213`) will not match th
 The cert was regenerated with the correct IP:
 
 ```bash
-cd /Users/miasolomon/Documents/GitHub/ME193
+cd "/Users/miasolomon/Documents/GitHub/ME193/Project 2 - April Tag Parking"
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout phone-camera-key.pem \
   -out phone-camera-cert.pem \
@@ -144,8 +144,8 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 
 ### Run command that works
 ```bash
-cd /Users/miasolomon/Documents/GitHub/ME193
-source ME193/le-venv/bin/activate
+cd "/Users/miasolomon/Documents/GitHub/ME193/Project 2 - April Tag Parking"
+source ../le-venv/bin/activate
 python updatedphone-apriltag.py --https --host 0.0.0.0 --port 8443
 ```
 

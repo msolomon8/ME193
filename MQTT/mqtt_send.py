@@ -1,13 +1,17 @@
+"""Send the "start" command over MQTT on the ME193/Rogers topic.
+
+Usage:
+    ../le-venv/bin/python mqtt_send.py
+
+Connects to the broker, publishes "start" once, waits until the broker has
+it, then exits.
+"""
+
 from mqttlib import MQTTClient
 
-TOPIC = "ME193"
+TOPIC = "ME193/Rogers"
+MESSAGE = "start"
 
 with MQTTClient() as client:
-    print(f"Connected. Type a message and press Enter to send it on '{TOPIC}'.")
-    print("Type 'quit' to stop.")
-
-    while True:
-        message = input("2")
-        if message == "quit":
-            break
-        client.publish(TOPIC, message)
+    client.publish(TOPIC, MESSAGE).wait_for_publish(timeout=10)
+    print(f"Sent '{MESSAGE}' on '{TOPIC}'")

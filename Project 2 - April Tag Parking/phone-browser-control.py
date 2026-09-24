@@ -11,6 +11,8 @@ Robot mode:
     python phone-browser-control.py --https --port 8443
 """
 
+import os
+import sys
 import argparse
 import base64
 import json
@@ -23,6 +25,8 @@ import cv2
 import legoeducation as le
 import numpy as np
 
+# lelib.py is shared across projects and lives one folder up, in ME193/.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lelib import doubleMotor
 
 
