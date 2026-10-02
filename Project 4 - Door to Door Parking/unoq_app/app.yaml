@@ -1,0 +1,3 @@
+name: Minifig Door to Door Parking
+icon: 🚗
+description: Follows the green LEGO minifig using boxes received over MQTT (ME193/minifig) and drives the motors to center it.

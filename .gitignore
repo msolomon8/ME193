@@ -32,3 +32,6 @@ runs/
 
 # Roboflow training dataset (personal photos; kept local)
 Project 4 - Door to Door Parking/dataset/
+
+# ...except the trained minifig detector that minifig_mqtt.py loads
+!Project 4 - Door to Door Parking/green_minifig.pt

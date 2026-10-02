@@ -3,8 +3,10 @@
 # Dataset: dataset/ (Roboflow YOLOv8 export, class "Lego-Minifig",
 # 81 train / 23 valid / 11 test images).
 # Training progress and the final weights land under
-# ME193/runs/detect/green_minifig/weights/best.pt (Ultralytics runs_dir setting)
+# ME193/runs/detect/green_minifig/weights/best.pt (Ultralytics runs_dir setting);
+# best.pt is then copied to green_minifig.pt next to this script.
 
+import shutil
 from pathlib import Path
 
 from ultralytics import YOLO
@@ -39,4 +41,8 @@ except Exception as e:
         device="cpu",
     )
 
-print("Done. Weights saved to ME193/runs/detect/green_minifig/weights/best.pt")
+# Copy the best weights next to this script, where minifig_mqtt.py loads them
+# (runs/ isn't in git, but green_minifig.pt is).
+best = Path(model.trainer.save_dir) / "weights" / "best.pt"
+shutil.copy(best, Path(__file__).parent / "green_minifig.pt")
+print(f"Done. Weights saved to {best} and copied to green_minifig.pt")
