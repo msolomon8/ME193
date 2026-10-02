@@ -25,3 +25,10 @@ vineyard-photo_grayscale.jpeg
 
 # Local HTTPS dev certificate/key (private key material -- never commit)
 *.pem
+
+# YOLO training output and weights
+runs/
+*.pt
+
+# Roboflow training dataset (personal photos; kept local)
+Project 4 - Door to Door Parking/dataset/
