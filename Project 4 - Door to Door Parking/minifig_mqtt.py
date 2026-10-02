@@ -2,11 +2,12 @@
 
 Uses the weights from train_minifig.py. Each published message is JSON:
 
-    {"x": 412, "y": 260, "width": 85, "height": 140}
+    {"x": 412, "y": 260, "width": 85, "height": 140, "img_w": 1280, "img_h": 720}
 
 x, y are the CENTER of the bounding box, and width, height its size, all in
-pixels of the camera frame. Only the most confident detection is sent, and
-nothing is sent on frames where no minifig is found.
+pixels of the camera frame; img_w, img_h are the frame's size. Only the most
+confident detection is sent, and nothing is sent on frames where no minifig
+is found.
 
 Usage:
     python minifig_mqtt.py                # default camera (0)
@@ -66,6 +67,7 @@ def main():
                     message = json.dumps({
                         "x": round(x), "y": round(y),
                         "width": round(w), "height": round(h),
+                        "img_w": frame.shape[1], "img_h": frame.shape[0],
                     })
                     client.publish(TOPIC, message)
                     last_publish = time.time()
