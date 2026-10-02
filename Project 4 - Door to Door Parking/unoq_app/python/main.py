@@ -27,7 +27,7 @@ FLIP_Y = True
 TARGET_X = 0.5      # where to stop (0.5 = middle of the screen)
 DEADBAND = 0.04     # "close enough" -> stop
 RESUME = 0.08       # once stopped, only move again if it drifts this far (prevents twitching)
-DIRECTION = 1       # set to -1 if the car drives AWAY from the center
+DIRECTION = -1       # set to -1 if the car drives AWAY from the center
 MIN_SPEED = 110     # slowest PWM that actually moves the car
 MAX_SPEED = 170     # keep low at first - camera lag causes overshoot
 GAIN = 600          # speed per unit of error
