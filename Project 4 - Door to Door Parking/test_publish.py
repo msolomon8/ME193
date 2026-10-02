@@ -9,7 +9,7 @@ ME193 = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ME193 / "MQTT"))
 from mqttlib import MQTTClient
 
-TOPIC = "ME193/minifig"
+TOPIC = f"ME193/minifig/tashamia"
 W, H = 1280, 720          # pretend camera size
 
 with MQTTClient() as client:

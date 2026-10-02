@@ -2,7 +2,7 @@
 # Receives the minifig box from minifig_mqtt.py over MQTT, shows a dot on the LED matrix,
 # and drives forward/backward until the minifig is in the middle of the camera image.
 #
-# Expected message (topic ME193/minifig), pixels:
+# Expected message (topic ME193/minifig/tashamia), pixels:
 #   {"x": 412, "y": 260, "width": 85, "height": 140, "img_w": 1280, "img_h": 720}
 # img_w / img_h are optional; FRAME_W / FRAME_H below are used if they're missing.
 from arduino.app_utils import *
@@ -12,7 +12,7 @@ import json, time, threading
 # ---- MQTT ----
 BROKER = "test.mosquitto.org"
 PORT = 1883
-TOPIC = "ME193/minifig"              # must match minifig_mqtt.py
+TOPIC = f"ME193/minifig/tashamia"    # must match minifig_mqtt.py
 CLIENT_ID = "ME193-minifig-car1"     # unique per car
 
 # Fallback camera size if the message doesn't include img_w / img_h

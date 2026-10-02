@@ -33,7 +33,7 @@ from mqttlib import MQTTClient
 
 # Ultralytics' runs_dir is set to ME193/runs, so training output lands there.
 WEIGHTS = ME193 / "runs" / "detect" / "green_minifig" / "weights" / "best.pt"
-TOPIC = "ME193/minifig"
+TOPIC = f"ME193/minifig/tashamia"
 CONFIDENCE = 0.5          # ignore detections less sure than this
 PUBLISH_INTERVAL = 0.1    # seconds between messages (~10 per second max)
 
