@@ -1,0 +1,3 @@
+name: Minifig Car - Blue
+icon: 🟦
+description: Drives until the blue LEGO minifig is on the RIGHT quarter of the computer's camera image, using boxes from two_car_mqtt.py over MQTT (ME193/minifig/tashamia/blue).

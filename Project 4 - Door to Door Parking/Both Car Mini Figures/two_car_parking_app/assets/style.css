@@ -1,0 +1,32 @@
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  margin: 24px;
+  background: #f4f4f4;
+  color: #222;
+}
+
+h1 { margin: 0 0 8px; }
+
+.green { color: #0a0; }
+.blue { color: #05f; }
+
+button {
+  font-size: 16px;
+  padding: 8px 16px;
+  margin-right: 12px;
+}
+
+#status { color: #666; }
+
+#stage { margin-top: 16px; }
+
+#view {
+  width: 100%;
+  max-width: 960px;
+  background: #000;
+  border-radius: 6px;
+}
+
+#readout { font-family: Menlo, monospace; }
+
+#cam { display: none; }

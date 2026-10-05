@@ -1,4 +1,4 @@
-// Two Minifig Parking - UNO Q MCU side: motors + LED matrix, controlled from Python via Bridge
+// Phase 0 - UNO Q MCU side: motors + LED matrix, controlled from Python via Bridge
 #include <Arduino_RouterBridge.h>
 #include <Arduino_LED_Matrix.h>
 
@@ -44,15 +44,6 @@ void dot(int col, int row) {
   matrix.draw(frame);
 }
 
-// Called from Python: Bridge.call("dots", gc, gr, gb, bc, br, bb)
-// Two dots at their own brightness (0-255): green minifig, blue minifig. -1 hides one.
-void dots(int c1, int r1, int b1, int c2, int r2, int b2) {
-  memset(frame, 0, sizeof(frame));
-  if (c1 >= 0 && c1 < 13 && r1 >= 0 && r1 < 8) frame[r1 * 13 + c1] = b1;
-  if (c2 >= 0 && c2 < 13 && r2 >= 0 && r2 < 8) frame[r2 * 13 + c2] = max((int)frame[r2 * 13 + c2], b2);
-  matrix.draw(frame);
-}
-
 void setup() {
   pinMode(M1A, OUTPUT); pinMode(M1B, OUTPUT);
   pinMode(M2A, OUTPUT); pinMode(M2B, OUTPUT);
@@ -65,7 +56,6 @@ void setup() {
   Bridge.begin();
   Bridge.provide("drive", drive);
   Bridge.provide("dot", dot);
-  Bridge.provide("dots", dots);
 }
 
 void loop() {

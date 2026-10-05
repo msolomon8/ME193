@@ -1,3 +1,0 @@
-name: Two Minifig Parking
-icon: 🚙
-description: Finds the green and blue LEGO minifigs with the board's USB camera and parks between them, one on each side of the camera image. Requires a USB camera connected to the board.
