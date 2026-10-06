@@ -36,6 +36,7 @@ WEIGHTS = Path(__file__).resolve().parent / "green_minifig.pt"
 TOPIC = f"ME193/minifig/tashamia"
 CONFIDENCE = 0.5          # ignore detections less sure than this
 PUBLISH_INTERVAL = 0.1    # seconds between messages (~10 per second max)
+TARGET_X = 0.5            # green line in the preview; must match TARGET_X in unoq_app
 
 
 def main():
@@ -74,7 +75,10 @@ def main():
                     print(message)
 
                 if not args.no_preview:
-                    cv2.imshow("minifig", result.plot())
+                    preview = result.plot()
+                    line_x = round(TARGET_X * preview.shape[1])
+                    cv2.line(preview, (line_x, 0), (line_x, preview.shape[0]), (0, 200, 0), 2)
+                    cv2.imshow("minifig", preview)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
         except KeyboardInterrupt:
