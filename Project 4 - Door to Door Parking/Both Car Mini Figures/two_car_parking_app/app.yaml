@@ -1,6 +1,0 @@
-name: Two Car Parking
-icon: 🚗
-description: Open the app's web page on the computer to stream its webcam to the board. Runs the trained green and blue minifig YOLO models, parks this (green) car with its minifig on the left and sends the blue car (car_blue_app) its minifig over MQTT so it parks on the right.
-
-bricks:
-  - arduino:web_ui

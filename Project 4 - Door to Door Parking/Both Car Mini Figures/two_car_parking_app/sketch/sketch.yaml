@@ -1,5 +1,0 @@
-profiles:
-  default:
-    platforms:
-      - platform: arduino:zephyr
-default_profile: default

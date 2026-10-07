@@ -1,20 +1,31 @@
-# Project 4 - BLUE car, UNO Q Linux side (runs in Arduino App Lab)
-# Receives the blue minifig's box from two_car_mqtt.py over MQTT, shows a dot on the LED matrix,
-# and drives forward/backward until the blue minifig is on the right of the camera image
-# (x = 0.75 of the width). The other car (car_green_app) uses the other side.
+# Project 4 - Two Car Door to Door Parking, UNO Q Linux side (runs in Arduino App Lab)
+# ONE app for BOTH cars: import this same app on each car's UNO Q and set CAR below.
+#   green car: listens for the green minifig, drives until it is on the LEFT line  (x = 0.25)
+#   blue car:  listens for the blue minifig,  drives until it is on the RIGHT line (x = 0.75)
+# The boxes come from both_minifigs_mqtt.py on the computer (camera + pop-up window).
+# Shows the minifig's position as a dot on the LED matrix.
 #
-# Expected message (topic ME193/minifig/tashamia/blue), pixels:
+# Expected message (topic ME193/minifig/tashamia/<car>), pixels:
 #   {"x": 412, "y": 260, "width": 85, "height": 140, "img_w": 1280, "img_h": 720}
 # img_w / img_h are optional; FRAME_W / FRAME_H below are used if they're missing.
 from arduino.app_utils import *
 import paho.mqtt.client as mqtt
 import json, time, threading
 
+# ---- Which car is this? ----
+CAR = "green"       # set to "blue" on the blue car's UNO Q
+
+# Per car: (stopping line, 0-1 across the screen). Must match MINIFIGS in both_minifigs_mqtt.py.
+CARS = {
+    "green": 0.25,  # left line
+    "blue": 0.75,   # right line
+}
+
 # ---- MQTT ----
 BROKER = "test.mosquitto.org"
 PORT = 1883
-TOPIC = "ME193/minifig/tashamia/blue"    # must match two_car_mqtt.py
-CLIENT_ID = "ME193-minifig-blue-car"  # unique per car (same ID = broker kicks the other car off)
+TOPIC = f"ME193/minifig/tashamia/{CAR}"   # must match both_minifigs_mqtt.py
+CLIENT_ID = f"ME193-minifig-{CAR}-car"  # unique per car (same ID = broker kicks the other car off)
 
 # Fallback camera size if the message doesn't include img_w / img_h
 FRAME_W = 1280
@@ -25,7 +36,7 @@ FLIP_X = False
 FLIP_Y = True
 
 # ---- Driving ----
-TARGET_X = 0.75     # where to stop: right side of the screen (0.5 = middle)
+TARGET_X = CARS[CAR]  # where to stop: this car's line
 DEADBAND = 0.04     # "close enough" -> stop
 RESUME = 0.08       # once stopped, only move again if it drifts this far (prevents twitching)
 DIRECTION = -1       # set to -1 if the car drives AWAY from the center

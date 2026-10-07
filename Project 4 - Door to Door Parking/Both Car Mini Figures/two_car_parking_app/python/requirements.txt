@@ -1,3 +1,0 @@
-onnxruntime
-numpy
-paho-mqtt>=2.0

@@ -1,0 +1,3 @@
+name: Two Car Door to Door Parking
+icon: 🚗
+description: One app for both cars. Set CAR in python/main.py to green (parks its minifig on the left line) or blue (right line). Receives minifig positions from both_minifigs_mqtt.py over MQTT.
