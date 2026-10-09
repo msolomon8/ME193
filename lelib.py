@@ -63,12 +63,14 @@ class singleMotor(_CardReader, le.SingleMotor):
 
 class doubleMotor(_CardReader, le.DoubleMotor):
 
-    def connect(self, card_serial=None, card_color=None):
+    def connect(self, card_serial=None, card_color=None, **kwargs):
         """Connect to a Double Motor. With no arguments, connects to the
-        first advertising Double Motor found (no Connection Card needed)."""
+        first advertising Double Motor found (no Connection Card needed).
+        Extra keyword arguments (e.g. device_notification_delay=20 for faster
+        IMU updates) are passed straight to legoeducation's connect()."""
         for attempt in range(5):
             try:
-                super().connect(card_color=card_color, card_serial=card_serial)
+                super().connect(card_color=card_color, card_serial=card_serial, **kwargs)
                 break
             except Exception as e:
                 if "not ready" in str(e).lower() and attempt < 4:
