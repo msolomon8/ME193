@@ -24,6 +24,8 @@ A Wii-style table tennis game against the computer. First to 5 wins.
   - MQTT: your record number of continuous hits is posted live to
     ME193/Rogers/Mia as a float (e.g. "7.0") every time you hit the ball.
     The record is saved in record.json, so it carries over between games.
+    Readable game updates (score, streak, YOU WIN!/YOU LOSE!) go to
+    ME193/Rogers/Mia/game, so the main channel stays a plain float.
 
 Usage (from the ME193 folder, venv python):
     le-venv/bin/python "Midterm - Ping Pong/ping_pong.py"               # Double Motor, red 1142 card
@@ -133,7 +135,8 @@ REWARD_YOU_MISS = 1.0        # the computer's shot made you miss: point for the 
 REWARD_YOU_RETURN = -0.3     # you got it back
 
 # ---- MQTT score ----
-MQTT_TOPIC = "ME193/Rogers/Mia"
+MQTT_TOPIC = "ME193/Rogers/Mia"             # the assignment's score: record streak as a float
+MQTT_GAME_TOPIC = "ME193/Rogers/Mia/game"   # readable updates: score, streak, win/lose
 RECORD_FILE = HERE / "record.json"
 
 # ---- AprilTag pointer (start page) ----
@@ -146,12 +149,15 @@ START_GRACE = 1.0            # ignore the pointer for this long after the start 
 LEVEL_BOX_W, LEVEL_BOX_H, LEVEL_BOX_TOP = 300, 180, 250
 
 # ---- Game screen (pixels) ----
-SCREEN_W, SCREEN_H = 1280, 720
-PIP_W, PIP_H = 400, 225      # camera picture-in-picture, bottom-right corner
+SCREEN_W, SCREEN_H = 1400, 800   # fits a MacBook Air screen (1470 x 956) with the title bar
+PIP_W, PIP_H = 384, 216      # camera picture-in-picture, bottom-right corner
+PIP_X, PIP_Y = SCREEN_W - PIP_W - 20, SCREEN_H - PIP_H - 20
 
 # Table in perspective: y of the far and near ends, and half widths there
-TABLE_FAR_Y, TABLE_NEAR_Y = 250, 600
-TABLE_FAR_HALF, TABLE_NEAR_HALF = 190, 400
+# (the table sits up and to the left so the camera view in the corner doesn't cover it)
+TABLE_X = 600                # table center on screen
+TABLE_FAR_Y, TABLE_NEAR_Y = 210, 540
+TABLE_FAR_HALF, TABLE_NEAR_HALF = 175, 360
 TABLE_THICKNESS = 18
 
 # ---- Ball flight (progress: 0 = computer's paddle, HIT_LINE = your paddle) ----
@@ -314,7 +320,7 @@ class Calibration:
         return False
 
     def draw(self, img):
-        rounded_panel(img, 240, 200, 800, 260)
+        rounded_panel(img, SCREEN_W // 2 - 400, 200, 800, 260)
         text(img, "Paddle calibration", SCREEN_W // 2, 260, 1.4, BLUE, 3, center=True)
         if self.phase == "still":
             text(img, "Hold the paddle still...", SCREEN_W // 2, 340, 1.1, center=True)
@@ -322,7 +328,7 @@ class Calibration:
             n = len(self.paddle.swing_peaks)
             text(img, f"Now swing it like a ping-pong shot!  {n} / {CALIBRATION_SWINGS}",
                  SCREEN_W // 2, 340, 1.0, center=True)
-        draw_gyro_meter(img, self.paddle, 440, 400, 400)
+        draw_gyro_meter(img, self.paddle, SCREEN_W // 2 - 200, 400, 400)
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +616,11 @@ class ScorePoster:
         if self.client is not None:
             self.client.publish(MQTT_TOPIC, f"{float(self.record):.1f}")
 
+    def game_update(self, message):
+        """Readable update on MQTT_GAME_TOPIC, e.g. "You 1 - 1 CPU, streak = 3, record = 20"."""
+        if self.client is not None:
+            self.client.publish(MQTT_GAME_TOPIC, message)
+
     def new_streak(self, streak):
         """Called on every hit: update the record if beaten, then post it (real time)."""
         if streak > self.record:
@@ -631,7 +642,7 @@ def table_point(lane, progress):
     progress: 0 = far (computer) end, 1 = near (your) end."""
     y = TABLE_FAR_Y + (TABLE_NEAR_Y - TABLE_FAR_Y) * progress
     half = TABLE_FAR_HALF + (TABLE_NEAR_HALF - TABLE_FAR_HALF) * progress
-    return int(SCREEN_W / 2 + (lane - 0.5) * 2 * half), int(y)
+    return int(TABLE_X + (lane - 0.5) * 2 * half), int(y)
 
 
 def scale_at(progress):
@@ -642,7 +653,7 @@ def scale_at(progress):
 def make_background():
     """Sky-to-white gradient wall and a light wooden floor, drawn once."""
     bg = np.zeros((SCREEN_H, SCREEN_W, 3), np.uint8)
-    horizon = 330
+    horizon = 300
     for y in range(horizon):
         t = y / horizon
         bg[y] = (255 - 20 * t, 215 + 30 * t, 150 + 90 * t)          # light blue -> pale
@@ -718,10 +729,11 @@ def banner(img, s, color, sub=None):
     if sub:
         w = max(w, cv2.getTextSize(sub, cv2.FONT_HERSHEY_DUPLEX, 0.9, 2)[0][0] + 60)
     h = 150 if sub else 100
-    rounded_panel(img, (SCREEN_W - w) // 2, 30, w, h, WHITE, 0.92, 30)
-    text(img, s, SCREEN_W // 2, 102, 2.2, color, 5, center=True)
+    x = max(10, TABLE_X - w // 2)                         # centered over the table
+    rounded_panel(img, x, 30, w, h, WHITE, 0.92, 30)
+    text(img, s, x + w // 2, 102, 2.2, color, 5, center=True)
     if sub:
-        text(img, sub, SCREEN_W // 2, 155, 0.9, TEXT_DARK, 2, center=True)
+        text(img, sub, x + w // 2, 155, 0.9, TEXT_DARK, 2, center=True)
 
 
 def draw_scoreboard(img, me, cpu, player_serving, streak, record, level):
@@ -755,7 +767,7 @@ def draw_gyro_meter(img, paddle, x, y, w):
 
 
 def draw_pip(img, frame, body, arm, swinging, tag_corners):
-    """Mirrored camera view in the bottom-right corner, with:
+    """Mirrored camera view in the top-right corner, with:
       - yellow lines where the table's edges and center are (move your arm between them)
       - your pose: arms, shoulders and body as white lines
       - the paddle point: green while you're swinging, red otherwise
@@ -778,7 +790,7 @@ def draw_pip(img, frame, body, arm, swinging, tag_corners):
     point = paddle_point(body)
     if point is not None:
         cv2.circle(small, px(point), 9, GREEN if swinging else MY_PADDLE, -1 if swinging else 2, cv2.LINE_AA)
-    x, y = SCREEN_W - PIP_W - 20, SCREEN_H - PIP_H - 20
+    x, y = PIP_X, PIP_Y
     rounded_panel(img, x - 6, y - 6, PIP_W + 12, PIP_H + 12, WHITE, 1.0, 12)
     img[y:y + PIP_H, x:x + PIP_W] = small
     if PADDLE_WRIST not in body:
@@ -841,6 +853,7 @@ class Game:
         self.level = level
         self.paddle.buzz(HIT_BUZZ_MS)
         self.poster.post()
+        self.poster.game_update(f"New game: {LEVELS[level][0]}, first to {WIN_SCORE}")
         self.set_state("serve")
 
     @property
@@ -852,6 +865,9 @@ class Game:
         if self.hover is None:
             return 0.0
         return min((time.time() - self.hover_since) / DWELL_TIME, 1.0)
+
+    def score_text(self):
+        return f"You {self.me} - {self.them} CPU, streak = {self.streak}, record = {self.poster.record}"
 
     def player_serving(self):
         return ((self.me + self.them) // SERVES_EACH) % 2 == 0
@@ -892,6 +908,7 @@ class Game:
             self.streak = 0
             self.message = ("MISS", RED)
             self.paddle.buzz(MISS_BUZZ_MS)
+        self.poster.game_update(f"{self.message[0]}! {self.score_text()}".replace("!!", "!"))
         self.set_state("point")
 
     # --- one frame ---
@@ -929,6 +946,7 @@ class Game:
                     if lined_up and swung:
                         self.streak += 1
                         self.poster.new_streak(self.streak)
+                        self.poster.game_update(self.score_text())
                         self.player_hits(paddle_lane, self.shot.lane())
                     elif f > HIT_WINDOW_END:
                         self.point(player_won=False)
@@ -945,6 +963,8 @@ class Game:
                     self.paddle.buzz(MISS_BUZZ_MS if self.me < self.them else HIT_BUZZ_MS * 4)
                     self.policy.save()
                     self.poster.post()
+                    self.poster.game_update(f"{self.message[0]} Final score {self.me} - {self.them}, "
+                                            f"record streak = {self.poster.record}")
                     self.set_state("game_over")
                 else:
                     self.shot = None
@@ -989,12 +1009,13 @@ class Game:
         layer = img.copy()
         cv2.rectangle(layer, (0, 0), (SCREEN_W, SCREEN_H), WHITE, -1)
         cv2.addWeighted(layer, 0.45, img, 0.55, 0, img)               # fade the table
-        rounded_panel(img, 340, 40, 600, 170, WHITE, 0.95, 30)
-        text(img, "Ping Pong", SCREEN_W // 2, 110, 2.0, BLUE, 4, center=True)
-        text(img, f"First to {WIN_SCORE} wins", SCREEN_W // 2, 152, 0.9, center=True)
-        text(img, "Point your AprilTag at a level and hold it there", SCREEN_W // 2, 188,
+        tx = SCREEN_W // 2
+        rounded_panel(img, tx - 300, 40, 600, 170, WHITE, 0.95, 30)
+        text(img, "Ping Pong", tx, 110, 2.0, BLUE, 4, center=True)
+        text(img, f"First to {WIN_SCORE} wins", tx, 152, 0.9, center=True)
+        text(img, "Point your AprilTag at a level and hold it there", tx, 188,
              0.7, MY_PADDLE, 2, center=True)
-        for i, (name, travel, color) in enumerate(LEVELS):
+        for i, (name, travel, color, _epsilon) in enumerate(LEVELS):
             x, y, w, h = level_box(i)
             hovered = i == self.hover
             rounded_panel(img, x, y, w, h, color if hovered else WHITE, 0.95, 26)

@@ -23,7 +23,7 @@ A virtual table tennis game you play against the computer. You hold a LEGO Doubl
 | **Pose**: is the paddle in the right place? | MediaPipe Pose finds your right shoulder, elbow and wrist. Your arm's position, measured from your shoulder, moves the paddle. | Project 1 (Pose Race) |
 | **IMU**: are you swinging? | The Double Motor's gyroscope is read 50 times a second. You only hit the ball if your rotation speed passes your calibrated swing threshold while the paddle is under the ball. | Q-table Training (IMU) |
 | **AprilTag**: player level and game start | One tag (id 0) is a pointer. Holding it on a level box picks the ball speed and starts the game. | Project 2 (AprilTag Parking) |
-| **Score over MQTT** | Your record number of continuous hits is posted as a float (e.g. `7.0`) to `ME193/Rogers/Mia` on every hit. | MQTT, Project 4 |
+| **Score over MQTT** | Your record number of continuous hits is posted as a float (e.g. `7.0`) to `ME193/Rogers/Mia` on every hit. Readable updates (`You 1 - 1 CPU, streak = 3, record = 20`, then `YOU WIN!` / `YOU LOSE!` with the final score) go to `ME193/Rogers/Mia/game`. Watch both with `watch_score.py`. | MQTT, Project 4 |
 | **Policy / AI** | The computer learns where to aim using Q-learning. | Q-table Training |
 | **Something new** | Haptic feedback: the motor in your hand buzzes on a hit and on a miss. Also a Wii-style AprilTag pointer, and swing calibration. | New |
 
@@ -118,3 +118,4 @@ Your returns follow simple physics-style rules rather than a policy:
 | `swing_calibration.json` | Your saved swing calibration (`--calibrate` redoes it) |
 | `q_table.json` | The computer's learned Q-table |
 | `record.json` | Your record streak |
+| `watch_score.py` | Prints what the game posts on both MQTT channels |
