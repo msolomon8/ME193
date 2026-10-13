@@ -1,6 +1,6 @@
 """Midterm - virtual ping-pong with the LEGO Double Motor as your paddle.
 
-A Wii-style table tennis game against the computer. First to 11 wins.
+A Wii-style table tennis game against the computer. First to 5 wins.
   - POSE (MediaPipe): your right arm's left/right position moves your paddle.
     The paddle is measured from your right shoulder (set on the start page, then
     locked for the game), so you can reach both sides of the table. The camera
@@ -13,8 +13,17 @@ A Wii-style table tennis game against the computer. First to 11 wins.
     left edge and it goes left, the center goes straight.
   - The rally goes back and forth until someone misses. Serve switches every
     2 points.
+  - APRILTAG start page: the tag (id 0, on your paddle) is a Wii-style pointer.
+    Hold it over Easy, Medium or Hard until the ring fills to pick the level
+    (ball speed) and start the game.
 
-Still to come: AprilTag start page (level), MQTT score, Q-learning opponent.
+  - Q-LEARNING opponent: the computer learns where to aim its shots (given
+    where your paddle is) to make you miss. Its Q-table is saved to
+    q_table.json, so it keeps learning your weak spots game after game.
+    Easy explores a lot (more random aims), Hard almost always uses what it learned.
+  - MQTT: your record number of continuous hits is posted live to
+    ME193/Rogers/Mia as a float (e.g. "7.0") every time you hit the ball.
+    The record is saved in record.json, so it carries over between games.
 
 Usage (from the ME193 folder, venv python):
     le-venv/bin/python "Midterm - Ping Pong/ping_pong.py"               # Double Motor, red 1142 card
@@ -23,7 +32,8 @@ Usage (from the ME193 folder, venv python):
     le-venv/bin/python "Midterm - Ping Pong/ping_pong.py" --camera 1
     le-venv/bin/python "Midterm - Ping Pong/ping_pong.py" --make-tag    # printable AprilTag
 
-Keys:  SPACE swing (--no-motor only)   q quit
+Keys:  1 / 2 / 3 pick Easy / Medium / Hard on the start page (backup for the tag)
+       SPACE swing (--no-motor only)   q quit
 """
 
 import argparse
@@ -85,9 +95,13 @@ MISS_BUZZ_MS = 400
 BUZZ_SPEED = 100
 
 # ---- Game ----
-WIN_SCORE = 11
+WIN_SCORE = 5
 SERVES_EACH = 2              # serve switches every 2 points
-TRAVEL_TIME = 1.6            # seconds for the computer's shots to reach you (levels change this in step 5)
+# Levels: (name, seconds for the computer's shots to reach you, box color, Q-learning epsilon)
+# Epsilon = how often the computer aims randomly instead of where it learned you miss.
+LEVELS = [("Easy", 2.1, (60, 170, 60), 0.5),
+          ("Medium", 1.6, (0, 160, 230), 0.2),
+          ("Hard", 1.2, (60, 60, 220), 0.05)]
 POINT_PAUSE = 1.3            # seconds the point banner shows before the next serve
 GAME_OVER_TIME = 4.0         # seconds the YOU WIN! / YOU LOSE! screen shows
 CPU_SERVE_DELAY = 0.8
@@ -100,11 +114,36 @@ PADDLE_WIDTH = 0.22          # how close (in table widths) the paddle must be to
 AIM_SPREAD = 0.40            # hitting with the paddle's edge sends the ball this far from center
 RETURN_SPEEDUP_MAX = 1.4     # a very hard swing makes your shot this much faster
 
-# Computer opponent (the Q-learning policy in step 7 will pick where it aims)
+# Computer opponent: its paddle movement (where it aims is the Q-learning policy below)
 CPU_REACTION = 0.25          # seconds before it starts moving toward your shot
 CPU_SPEED = 0.55             # table widths per second it can move
 CPU_REACH = 0.10             # how close its paddle must be to return the ball
 CPU_ERROR = 0.06             # how far off (std dev) its guess of where the ball lands is
+
+# ---- Q-learning (where the computer aims) ----
+Q_TABLE_FILE = HERE / "q_table.json"
+STATE_EDGES = [0.2, 0.4, 0.6, 0.8]                 # your paddle lane -> 5 states (far left .. far right)
+STATE_NAMES = ["far left", "left", "center", "right", "far right"]
+AIMS = [0.15, 0.32, 0.5, 0.68, 0.85]                # 5 actions: aim lanes across the table
+AIM_NAMES = ["far left", "left", "center", "right", "far right"]
+AIM_NOISE = 0.04                                     # the computer isn't perfectly accurate
+ALPHA = 0.3                  # learning rate
+GAMMA = 0.5                  # how much the next shot's value counts
+REWARD_YOU_MISS = 1.0        # the computer's shot made you miss: point for the computer
+REWARD_YOU_RETURN = -0.3     # you got it back
+
+# ---- MQTT score ----
+MQTT_TOPIC = "ME193/Rogers/Mia"
+RECORD_FILE = HERE / "record.json"
+
+# ---- AprilTag pointer (start page) ----
+TAG_ID = 0                   # the one tag, on your paddle (print it with --make-tag)
+POINTER_GAIN = 1.6           # moving the tag across the middle 1/1.6 of the camera covers the screen
+POINTER_SMOOTHING = 0.6
+TAG_LOST_TIME = 0.4          # seconds without seeing the tag before the pointer disappears
+DWELL_TIME = 2.0             # hold the pointer on a level this long to pick it
+START_GRACE = 1.0            # ignore the pointer for this long after the start page appears
+LEVEL_BOX_W, LEVEL_BOX_H, LEVEL_BOX_TOP = 300, 180, 250
 
 # ---- Game screen (pixels) ----
 SCREEN_W, SCREEN_H = 1280, 720
@@ -375,6 +414,64 @@ class ArmTracker:
 
 
 # ---------------------------------------------------------------------------
+# AprilTag pointer (same detector as Project 2)
+# ---------------------------------------------------------------------------
+
+class TagPointer:
+    """Finds the AprilTag in the camera and turns it into a pointer on the
+    game screen, like a Wii remote. Positions are mirrored to match the picture."""
+
+    def __init__(self):
+        dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36H11)
+        parameters = cv2.aruco.DetectorParameters()
+        parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
+        self.detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+        self.pos = None            # (x, y) on the game screen, or None if the tag isn't seen
+        self.corners = None        # tag corners as mirrored 0-1 camera fractions (for the camera view)
+        self.last_seen = 0.0
+
+    def update(self, frame):
+        h, w = frame.shape[:2]
+        corners, ids, _ = self.detector.detectMarkers(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        now = time.time()
+        found = None
+        if ids is not None:
+            for c, tag_id in zip(corners, ids.flatten()):
+                if tag_id == TAG_ID:
+                    found = c[0]
+        if found is None:
+            if now - self.last_seen > TAG_LOST_TIME:
+                self.pos = self.corners = None
+            return
+        self.last_seen = now
+        self.corners = [(1 - x / w, y / h) for x, y in found]
+        cx, cy = np.mean(self.corners, axis=0)
+        sx = min(max(SCREEN_W * (0.5 + (cx - 0.5) * POINTER_GAIN), 0), SCREEN_W - 1)
+        sy = min(max(SCREEN_H * (0.5 + (cy - 0.5) * POINTER_GAIN), 0), SCREEN_H - 1)
+        if self.pos is None:
+            self.pos = (sx, sy)
+        else:
+            self.pos = (POINTER_SMOOTHING * self.pos[0] + (1 - POINTER_SMOOTHING) * sx,
+                        POINTER_SMOOTHING * self.pos[1] + (1 - POINTER_SMOOTHING) * sy)
+
+
+def level_box(i):
+    """(x, y, w, h) of level i's box on the start page."""
+    cx = SCREEN_W * (i + 1) // 4
+    return cx - LEVEL_BOX_W // 2, LEVEL_BOX_TOP, LEVEL_BOX_W, LEVEL_BOX_H
+
+
+def level_at(pos):
+    if pos is None:
+        return None
+    for i in range(len(LEVELS)):
+        x, y, w, h = level_box(i)
+        if x <= pos[0] <= x + w and y <= pos[1] <= y + h:
+            return i
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Ball flight
 # ---------------------------------------------------------------------------
 
@@ -442,9 +539,87 @@ class Opponent:
     def can_reach(self, lane):
         return abs(self.lane - lane) <= CPU_REACH
 
-    def choose_aim(self):
-        """Where its next shot goes. Step 7 replaces this with the Q-learning policy."""
-        return random.uniform(0.12, 0.88)
+
+
+class QPolicy:
+    """Q-learning for WHERE the computer aims (same update as the Q-table Training project).
+      State  = where your paddle is when the computer hits (5 bins, far left .. far right)
+      Action = which of 5 lanes to aim at
+      Reward = +1 if you miss that shot, -0.3 if you return it
+      Update = Q(s,a) = (1 - alpha)*Q(s,a) + alpha*(r + gamma*max Q(s'))
+               s' = where you are at the computer's next shot (none if the point ended)
+      Policy = epsilon-greedy: aim randomly with probability epsilon (set by the
+               level), otherwise aim at the lane with the highest Q for your position."""
+
+    def __init__(self):
+        self.Q = np.zeros((len(STATE_NAMES), len(AIMS)))
+        self.shots = 0
+        if Q_TABLE_FILE.exists():
+            data = json.loads(Q_TABLE_FILE.read_text())
+            if data.get("aims") == AIMS and data.get("state_edges") == STATE_EDGES:
+                self.Q, self.shots = np.array(data["Q"]), data["shots"]
+                print(f"Loaded Q-table from {Q_TABLE_FILE.name} ({self.shots} shots learned)")
+
+    @staticmethod
+    def state_of(paddle_lane):
+        return int(np.digitize(paddle_lane, STATE_EDGES))
+
+    def choose(self, s, epsilon):
+        if random.random() < epsilon:
+            return random.randrange(len(AIMS))                     # explore
+        best = np.flatnonzero(self.Q[s] == self.Q[s].max())
+        return int(random.choice(best))                            # exploit (random among ties)
+
+    def update(self, s, a, r, s_next=None):
+        future = 0.0 if s_next is None else GAMMA * self.Q[s_next].max()
+        self.Q[s, a] = (1 - ALPHA) * self.Q[s, a] + ALPHA * (r + future)
+        self.shots += 1
+
+    def save(self):
+        Q_TABLE_FILE.write_text(json.dumps({"Q": self.Q.round(4).tolist(), "shots": self.shots,
+                                            "aims": AIMS, "state_edges": STATE_EDGES}, indent=1))
+
+    def print_table(self):
+        print("\nQ-table (rows = where you are, columns = where the computer aims)")
+        print(f"{'you are':>10}" + "".join(f"{n:>11}" for n in AIM_NAMES) + "   best aim")
+        for s, name in enumerate(STATE_NAMES):
+            best = AIM_NAMES[int(self.Q[s].argmax())] if self.Q[s].any() else "-"
+            print(f"{name:>10}" + "".join(f"{q:11.2f}" for q in self.Q[s]) + f"   {best}")
+        print()
+
+
+class ScorePoster:
+    """Posts your record number of continuous hits to MQTT_TOPIC as a float,
+    using the class MQTT helper (MQTT/mqttlib.py, test.mosquitto.org).
+    If the broker can't be reached the game still runs; it just doesn't post."""
+
+    def __init__(self):
+        self.record = 0
+        if RECORD_FILE.exists():
+            self.record = json.loads(RECORD_FILE.read_text()).get("record", 0)
+        self.client = None
+        try:
+            sys.path.insert(0, str(ME193 / "MQTT"))
+            from mqttlib import MQTTClient
+            self.client = MQTTClient().connect()
+            print(f"MQTT connected: posting your record to {MQTT_TOPIC}")
+        except Exception as e:
+            print(f"MQTT not connected ({e}); the score won't be posted.")
+
+    def post(self):
+        if self.client is not None:
+            self.client.publish(MQTT_TOPIC, f"{float(self.record):.1f}")
+
+    def new_streak(self, streak):
+        """Called on every hit: update the record if beaten, then post it (real time)."""
+        if streak > self.record:
+            self.record = streak
+            RECORD_FILE.write_text(json.dumps({"record": self.record}))
+        self.post()
+
+    def close(self):
+        if self.client is not None:
+            self.client.disconnect()
 
 
 # ---------------------------------------------------------------------------
@@ -549,15 +724,17 @@ def banner(img, s, color, sub=None):
         text(img, sub, SCREEN_W // 2, 155, 0.9, TEXT_DARK, 2, center=True)
 
 
-def draw_scoreboard(img, me, cpu, player_serving, streak, best):
+def draw_scoreboard(img, me, cpu, player_serving, streak, record, level):
     rounded_panel(img, 20, 20, 250, 110)
+    if level is not None:
+        text(img, LEVELS[level][0], 290, 50, 0.8, LEVELS[level][2], 2)
     text(img, "YOU", 40, 62, 0.9, MY_PADDLE)
     text(img, str(me), 200, 64, 1.3, MY_PADDLE, 3)
     text(img, "CPU", 40, 110, 0.9, CPU_PADDLE)
     text(img, str(cpu), 200, 112, 1.3, CPU_PADDLE, 3)
     cv2.circle(img, (150, 54 if player_serving else 102), 7, (0, 200, 255), -1, cv2.LINE_AA)  # serve dot
     rounded_panel(img, 20, 140, 250, 50)
-    text(img, f"Streak {streak}   Best {best}", 36, 174, 0.7)
+    text(img, f"Streak {streak}   Record {record}", 36, 174, 0.7)
 
 
 def draw_gyro_meter(img, paddle, x, y, w):
@@ -577,11 +754,12 @@ def draw_gyro_meter(img, paddle, x, y, w):
     text(img, f"swing {paddle.gyro:.0f}", x, y + 46, 0.55, TEXT_DARK, 1)
 
 
-def draw_pip(img, frame, body, arm, swinging):
+def draw_pip(img, frame, body, arm, swinging, tag_corners):
     """Mirrored camera view in the bottom-right corner, with:
       - yellow lines where the table's edges and center are (move your arm between them)
       - your pose: arms, shoulders and body as white lines
-      - the paddle point: green while you're swinging, red otherwise"""
+      - the paddle point: green while you're swinging, red otherwise
+      - a blue outline around the AprilTag when it's seen"""
     small = cv2.resize(cv2.flip(frame, 1), (PIP_W, PIP_H))
     def px(pt):
         return int(pt[0] * PIP_W), int(pt[1] * PIP_H)
@@ -595,6 +773,8 @@ def draw_pip(img, frame, body, arm, swinging):
     for i in (11, 12, 13, 14, 15, 16):
         if i in body:
             cv2.circle(small, px(body[i]), 3, WHITE, -1, cv2.LINE_AA)
+    if tag_corners is not None:
+        cv2.polylines(small, [np.array([px(c) for c in tag_corners])], True, BLUE, 2, cv2.LINE_AA)
     point = paddle_point(body)
     if point is not None:
         cv2.circle(small, px(point), 9, GREEN if swinging else MY_PADDLE, -1 if swinging else 2, cv2.LINE_AA)
@@ -626,16 +806,20 @@ def make_tag(tag_id=0, pixels=600):
 
 class Game:
     """Game states:
-      start      waiting for you to swing to begin
+      start      pick a level by holding the AprilTag pointer on it (or keys 1/2/3)
       serve      someone is about to serve (you: swing to serve; CPU: after a pause)
       rally      the ball is in play
       point      someone just won a point (banner), then -> serve or game over
       game_over  YOU WIN! / YOU LOSE! for a few seconds, then -> start"""
 
-    def __init__(self, paddle):
+    def __init__(self, paddle, policy, poster):
         self.paddle = paddle
         self.cpu = Opponent()
-        self.best_streak = 0
+        self.policy = policy          # Q-learning: where the computer aims
+        self.poster = poster          # MQTT: your record streak
+        self.level = 1
+        self.paddle_lane = 0.5
+        self.pending = None           # (state, action) of the computer's last shot, waiting for its reward
         self.to_start()
 
     def set_state(self, state):
@@ -650,7 +834,24 @@ class Game:
         self.streak = 0
         self.shot = None
         self.message = None
+        self.hover, self.hover_since = None, 0.0
         self.set_state("start")
+
+    def start_game(self, level):
+        self.level = level
+        self.paddle.buzz(HIT_BUZZ_MS)
+        self.poster.post()
+        self.set_state("serve")
+
+    @property
+    def travel_time(self):
+        return LEVELS[self.level][1]
+
+    def dwell(self):
+        """0-1: how far the ring has filled on the hovered level."""
+        if self.hover is None:
+            return 0.0
+        return min((time.time() - self.hover_since) / DWELL_TIME, 1.0)
 
     def player_serving(self):
         return ((self.me + self.them) // SERVES_EACH) % 2 == 0
@@ -663,16 +864,26 @@ class Game:
         aim = min(0.9, max(0.1, 0.5 + offset * AIM_SPREAD + random.gauss(0, 0.05)))
         power = self.paddle.swing_peak / self.paddle.threshold if self.paddle.threshold else 1.0
         speedup = min(RETURN_SPEEDUP_MAX, max(1.0, 0.8 + 0.2 * power))
-        self.shot = Shot(False, from_lane, aim, TRAVEL_TIME / speedup)
+        self.shot = Shot(False, from_lane, aim, self.travel_time / speedup)
         self.cpu.track(self.shot)
         self.paddle.buzz(HIT_BUZZ_MS)
 
     def cpu_hits(self, from_lane):
-        self.shot = Shot(True, from_lane, self.cpu.choose_aim(), TRAVEL_TIME)
+        """The computer hits: the Q-learning policy picks where to aim from where you are."""
+        s = self.policy.state_of(self.paddle_lane)
+        if self.pending is not None:                  # you returned its last shot
+            self.policy.update(*self.pending, REWARD_YOU_RETURN, s)
+        a = self.policy.choose(s, LEVELS[self.level][3])
+        self.pending = (s, a)
+        aim = min(0.92, max(0.08, AIMS[a] + random.gauss(0, AIM_NOISE)))
+        self.shot = Shot(True, from_lane, aim, self.travel_time)
         self.cpu.go_home()
         self.hit_window_opened = None
 
     def point(self, player_won):
+        if self.pending is not None:                  # the point ended: last shot's reward, no next state
+            self.policy.update(*self.pending, REWARD_YOU_RETURN if player_won else REWARD_YOU_MISS)
+            self.pending = None
         if player_won:
             self.me += 1
             self.message = ("POINT!", GREEN)
@@ -685,13 +896,17 @@ class Game:
 
     # --- one frame ---
 
-    def update(self, paddle_lane, dt):
+    def update(self, paddle_lane, dt, pointer):
         now = time.time()
+        self.paddle_lane = paddle_lane
         self.cpu.update(dt)
 
         if self.state == "start":
-            if now - self.state_time > 0.5 and self.swung_since(self.state_time + 0.5):
-                self.set_state("serve")
+            level = level_at(pointer) if now - self.state_time > START_GRACE else None
+            if level != self.hover:
+                self.hover, self.hover_since = level, now
+            elif level is not None and self.dwell() >= 1.0:
+                self.start_game(level)
 
         elif self.state == "serve":
             if self.player_serving():
@@ -713,7 +928,7 @@ class Game:
                         self.swung_since(self.shot.t0)
                     if lined_up and swung:
                         self.streak += 1
-                        self.best_streak = max(self.best_streak, self.streak)
+                        self.poster.new_streak(self.streak)
                         self.player_hits(paddle_lane, self.shot.lane())
                     elif f > HIT_WINDOW_END:
                         self.point(player_won=False)
@@ -728,6 +943,8 @@ class Game:
                 if self.me >= WIN_SCORE or self.them >= WIN_SCORE:
                     self.message = ("YOU WIN!", GREEN) if self.me > self.them else ("YOU LOSE!", RED)
                     self.paddle.buzz(MISS_BUZZ_MS if self.me < self.them else HIT_BUZZ_MS * 4)
+                    self.policy.save()
+                    self.poster.post()
                     self.set_state("game_over")
                 else:
                     self.shot = None
@@ -738,7 +955,7 @@ class Game:
             if now - self.state_time > GAME_OVER_TIME:
                 self.to_start()
 
-    def draw(self, img, paddle_lane):
+    def draw(self, img, paddle_lane, pointer):
         draw_table(img)
         draw_paddle(img, table_point(self.cpu.lane, -0.08), 34 * scale_at(0), CPU_PADDLE)
 
@@ -752,22 +969,50 @@ class Game:
         px, py = table_point(paddle_lane, HIT_LINE)
         draw_paddle(img, (px, py - PADDLE_LIFT), 60, MY_PADDLE, 0.8)
 
-        draw_scoreboard(img, self.me, self.them, self.player_serving(), self.streak, self.best_streak)
+        draw_scoreboard(img, self.me, self.them, self.player_serving(), self.streak, self.poster.record,
+                        None if self.state == "start" else self.level)
         if isinstance(self.paddle, MotorPaddle):
             draw_gyro_meter(img, self.paddle, 20, 210, 250)
 
         if self.state == "start":
-            rounded_panel(img, 340, 230, 600, 180, WHITE, 0.92, 30)
-            text(img, "Ping Pong", SCREEN_W // 2, 300, 2.0, BLUE, 4, center=True)
-            text(img, f"First to {WIN_SCORE} wins", SCREEN_W // 2, 345, 0.9, center=True)
-            text(img, "Swing your paddle to start!", SCREEN_W // 2, 390, 0.9, MY_PADDLE, 2, center=True)
+            self.draw_start_page(img, pointer)
         elif self.state == "serve" and self.player_serving():
             banner(img, "Your serve", BLUE, "Swing to serve")
         elif self.state == "point":
             banner(img, self.message[0], self.message[1], f"You {self.me}  -  {self.them} CPU")
         elif self.state == "game_over":
             banner(img, self.message[0], self.message[1],
-                   f"Final score {self.me} - {self.them}   Best streak {self.best_streak}")
+                   f"Final score {self.me} - {self.them}   Record streak {self.poster.record}")
+
+    def draw_start_page(self, img, pointer):
+        """Title, the three level boxes, and the AprilTag pointer with its fill ring."""
+        layer = img.copy()
+        cv2.rectangle(layer, (0, 0), (SCREEN_W, SCREEN_H), WHITE, -1)
+        cv2.addWeighted(layer, 0.45, img, 0.55, 0, img)               # fade the table
+        rounded_panel(img, 340, 40, 600, 170, WHITE, 0.95, 30)
+        text(img, "Ping Pong", SCREEN_W // 2, 110, 2.0, BLUE, 4, center=True)
+        text(img, f"First to {WIN_SCORE} wins", SCREEN_W // 2, 152, 0.9, center=True)
+        text(img, "Point your AprilTag at a level and hold it there", SCREEN_W // 2, 188,
+             0.7, MY_PADDLE, 2, center=True)
+        for i, (name, travel, color) in enumerate(LEVELS):
+            x, y, w, h = level_box(i)
+            hovered = i == self.hover
+            rounded_panel(img, x, y, w, h, color if hovered else WHITE, 0.95, 26)
+            cv2.rectangle(img, (x + 26, y), (x + w - 26, y + 6), color, -1)
+            text(img, name, x + w // 2, y + 85, 1.5, WHITE if hovered else color, 3, center=True)
+            text(img, f"{travel:.1f} s ball", x + w // 2, y + 135, 0.8,
+                 WHITE if hovered else TEXT_DARK, 2, center=True)
+        if pointer is None:
+            text(img, "Can't see the AprilTag - hold it up to the camera", SCREEN_W // 2, 480,
+                 0.8, RED, 2, center=True)
+        else:
+            p = (int(pointer[0]), int(pointer[1]))
+            cv2.circle(img, p, 26, WHITE, -1, cv2.LINE_AA)
+            cv2.circle(img, p, 26, BLUE, 3, cv2.LINE_AA)
+            if self.hover is not None:                                # fill ring
+                cv2.circle(img, p, 34, WHITE, 10, cv2.LINE_AA)
+                cv2.ellipse(img, p, (34, 34), -90, 0, 360 * self.dwell(), BLUE, 8, cv2.LINE_AA)
+            cv2.circle(img, p, 6, BLUE, -1, cv2.LINE_AA)
 
 
 # ---------------------------------------------------------------------------
@@ -807,9 +1052,12 @@ def main():
         sys.exit(f"Could not open camera {args.camera}")
     pose = create_pose()
     background = make_background()
-    game = Game(paddle)
+    policy = QPolicy()
+    poster = ScorePoster()
+    game = Game(paddle, policy, poster)
     start = last = time.time()
     arm = ArmTracker()
+    pointer = TagPointer()
 
     try:
         while True:
@@ -824,6 +1072,8 @@ def main():
             arm.locked = calibration is None and game.state != "start"
             paddle_lane = arm.update(body)
             swinging = paddle.threshold is not None and now - paddle.swing_time < 0.15
+            if game.state == "start":
+                pointer.update(frame)
 
             screen = background.copy()
             if calibration is not None:
@@ -834,17 +1084,23 @@ def main():
                 else:
                     calibration.draw(screen)
             else:
-                game.update(paddle_lane, dt)
-                game.draw(screen, paddle_lane)
-            draw_pip(screen, frame, body, arm, swinging)
+                game.update(paddle_lane, dt, pointer.pos)
+                game.draw(screen, paddle_lane, pointer.pos)
+            on_start = calibration is None and game.state == "start"
+            draw_pip(screen, frame, body, arm, swinging, pointer.corners if on_start else None)
 
             cv2.imshow(WINDOW_NAME, screen)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
+            if on_start and key in (ord("1"), ord("2"), ord("3")):
+                game.start_game(key - ord("1"))
             if key == ord(" ") and isinstance(paddle, KeyboardPaddle):
                 paddle.swing()
     finally:
+        policy.save()
+        policy.print_table()
+        poster.close()
         pose.close()
         cap.release()
         cv2.destroyAllWindows()
