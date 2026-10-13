@@ -37,3 +37,6 @@ Project 4 - Door to Door Parking/blue_minifig/dataset/
 # ...except the trained minifig detectors that the *_mqtt.py scripts load
 !Project 4 - Door to Door Parking/green_minifig.pt
 !Project 4 - Door to Door Parking/blue_minifig/blue_minifig.pt
+
+# Notion page draft (kept local, not on GitHub)
+Midterm - Ping Pong/notion_page.md
