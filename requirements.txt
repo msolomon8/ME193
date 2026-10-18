@@ -7,7 +7,7 @@ cycler==0.12.1
 flatbuffers==25.12.19
 fonttools==4.65.0
 kiwisolver==1.5.1
-legoeducation==1.1.1
+legoeducation==1.2.0
 matplotlib==3.11.2
 mediapipe==0.10.35
 numpy==2.5.3
