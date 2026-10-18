@@ -14,10 +14,9 @@ Inputs:
     ArduinoApps "sumo-vision" app.
   - Double Motor's IMU (autonomous): a sudden backward jolt we didn't cause = we just got
     hit or pushed from the front.
-  - LEGO controller (teleop): the driver's strategy.
-        left lever  = aggression: up = attack, down = defend
-        right lever = side bias:  up = favor turning right, down = favor left
-        both levers fully down for 1 s = "we're out" (backup for the sad song)
+  - LEGO controller (teleop): an ABSOLUTE OVERRIDE. Touch either lever and you drive
+    (tank style: left lever = left wheels, right lever = right wheels), ignoring every
+    sensor. Let go of both and the behavior tree takes back over.
 
 Sensor fusion: the camera watches the front, the color sensor watches the back.
   - Front edge: only the camera sees it. A little tape ahead -> veer away. A lot -> back
@@ -35,11 +34,11 @@ Sensor fusion: the camera watches the front, the color sensor watches the back.
   - Out: the floor is the same inside and outside the ring, so only the tape tells us.
     When we're shoved out backward, the back sensor crosses the tape first (sees blue,
     then floor again). If the front camera THEN sees the tape in front of us, the whole
-    robot is past it: we're out. Without the camera there's no automatic "out"; use the
-    controller's both-levers-down instead.
+    robot is past it: we're out. Without the camera there's no automatic "out".
 
 The policy is a behavior tree, checked top to bottom 20 times a second:
     Selector
+    |- a controller lever moved?               -> the driver drives (absolute override)
     |- out of the ring?                        -> stop, play the sad song
     |- back on tape + opponent in contact?     -> being pushed out: full power back at it
     |- back on tape?                           -> full power forward off the edge, then turn
@@ -72,8 +71,8 @@ sys.path.insert(0, str(ME193 / "MQTT"))    # mqttlib.py
 MOTOR_CARD = None        # None = first Double Motor found
 COLOR_CARD = None
 CONTROLLER_CARD = None
-USE_CONTROLLER = False   # TODO: set True once the controller is back
-NO_CONTROLLER_LEVERS = (1.0, 0.0)   # without it: full attack, no side bias
+USE_CONTROLLER = True    # False = run without the controller (fully autonomous)
+LEVER_DEADBAND = 0.05    # levers within this of center count as "let go"
 MOTOR_BACKWARD = True    # the Double Motor faces the back of the robot (flips forward AND left/right)
 
 # ---- MQTT ----
@@ -181,9 +180,11 @@ class Blackboard:
         self.tape_ahead = 0.0
         self.tape_x = 0.0
         self.pushed_front = False    # IMU
-        self.aggression = 0.0        # driver, -1 (defend) .. +1 (attack)
-        self.side_bias = 0.0         # driver, -1 (left) .. +1 (right)
-        self.give_up_since = None
+        self.lever_left = 0.0        # controller, -1 .. +1
+        self.lever_right = 0.0
+        # strategy: fixed for now (the controller is a full override instead)
+        self.aggression = 1.0        # -1 (defend) .. +1 (attack)
+        self.side_bias = 0.0         # -1 (favor left) .. +1 (favor right)
         # outputs / memory
         self.drive = (0, 0)
         self.maneuver = []           # queued (left, right, until) steps
@@ -201,8 +202,10 @@ def is_out(bb):
     """The back crossed the blue tape AND the front camera now sees it (see sense())."""
     now = time.monotonic()
     past_tape = bb.out_since is not None and now - bb.out_since > OUT_CONFIRM
-    driver_says = bb.give_up_since is not None and now - bb.give_up_since > 1.0
-    return bb.lost or past_tape or driver_says
+    return bb.lost or past_tape
+
+def driver_override(bb):
+    return abs(bb.lever_left) > LEVER_DEADBAND or abs(bb.lever_right) > LEVER_DEADBAND
 
 def maneuvering(bb):
     while bb.maneuver and time.monotonic() > bb.maneuver[0][2]:
@@ -239,6 +242,11 @@ def lose(bb):
         bb.lost = True
         print("\nOUT OF THE RING. Stopping.")
         play_sad_song()
+
+def driver_drives(bb):
+    """Absolute override: the levers go straight to the wheels."""
+    bb.maneuver = []
+    bb.drive = (clip(bb.lever_left * 100), clip(bb.lever_right * 100))
 
 def continue_maneuver(bb):
     left, right, _ = bb.maneuver[0]
@@ -295,6 +303,7 @@ def search(bb):
 
 
 TREE = Selector(
+    Sequence(Condition("lever moved", driver_override), Action("DRIVER OVERRIDE", driver_drives)),
     Sequence(Condition("out", is_out), Action("OUT - sad song", lose)),
     Sequence(Condition("back on tape", back_on_tape), Condition("contact", in_contact),
              Action("PUSHED! pushing back", push_back)),
@@ -368,7 +377,7 @@ class LegoRobot:
             self.controller = controller()
             self.controller.connect(card_serial=CONTROLLER_CARD)
         else:
-            print("No controller (USE_CONTROLLER = False): full attack, no side bias.")
+            print("No controller (USE_CONTROLLER = False): fully autonomous.")
         print("All LEGO parts connected.")
         self._last = None
         # IMU push detection runs in its own thread, faster than the tree
@@ -410,7 +419,7 @@ class LegoRobot:
 
     def levers(self):
         if self.controller is None:
-            return NO_CONTROLLER_LEVERS
+            return 0.0, 0.0
         return self.controller.left_position() / 100, self.controller.right_position() / 100
 
     def drive(self, left, right):
@@ -461,11 +470,7 @@ def sense(bb, robot, vision):
     else:
         bb.out_since = None
 
-    bb.aggression, bb.side_bias = robot.levers()
-    if bb.aggression <= -0.9 and bb.side_bias <= -0.9:
-        bb.give_up_since = bb.give_up_since or now
-    else:
-        bb.give_up_since = None
+    bb.lever_left, bb.lever_right = robot.levers()
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +560,7 @@ def main():
             if bb.active != last_active:    # print only when the decision changes
                 print(f"[{bb.active:18s}] floor={bb.floor:4s} opp={'Y' if bb.opp_seen else 'n'} "
                       f"x={bb.opp_x:+.2f} size={bb.opp_size:.2f} tape_ahead={bb.tape_ahead:.2f} "
-                      f"attack={bb.aggression:+.1f} side={bb.side_bias:+.1f}")
+                      f"levers={bb.lever_left:+.1f}/{bb.lever_right:+.1f}")
                 last_active = bb.active
             if bb.lost:
                 time.sleep(3)               # let the song finish
