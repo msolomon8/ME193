@@ -6,34 +6,41 @@ Run (from the ME193 folder):
     le-venv/bin/python "Robot Sumo/sumo_brain.py" --no-lego    # test the tree with only the camera
 
 Inputs:
-  - LEGO color sensor (autonomous): is the front of the robot on the ring floor, on the
-    blue tape, or off the ring entirely?
-  - Logitech webcam on the UNO Q (autonomous): where the opponent is and whether blue tape
-    is coming up. It arrives over MQTT on ME193/Rogers/MK from the ArduinoApps
-    "sumo-vision" app.
+  - LEGO color sensor on the BACK, pointing down (autonomous): is the back of the robot on
+    the ring floor, on the blue tape, or off the ring?
+  - Logitech webcam on the FRONT, on the UNO Q (autonomous): where the opponent is and
+    whether blue tape is coming up. It arrives over MQTT on ME193/Rogers/MK from the
+    ArduinoApps "sumo-vision" app.
   - LEGO controller (teleop): the driver's strategy.
         left lever  = aggression: up = attack, down = defend
         right lever = side bias:  up = favor turning right, down = favor left
         both levers fully down for 1 s = "we're out" (backup for the sad song)
 
-Sensor fusion: the two autonomous sensors cover each other's blind spots.
-  - The color sensor is certain about the edge, but only once the robot is already on it.
-    The camera sees tape coming but is noisy. The camera warns early (veer away), and the
-    color sensor gives the hard "back off" signal.
-  - The color sensor says WHERE we are (on the edge). The camera says WHICH WAY the edge
-    runs (tape_x), so the robot turns away from the edge and not along it.
-  - On the tape alone means retreat. On the tape AND the opponent filling the camera
-    means the opponent is past the tape too, so if the driver is on attack, keep pushing.
+Sensor fusion: the camera watches the front, the color sensor watches the back.
+  - Front edge: only the camera sees it. A little tape ahead -> veer away. A lot -> back
+    up and turn away from the side the tape is on (tape_x).
+  - Back edge: the color sensor. The back usually only reaches the tape when we're being
+    pushed, so the answer is always full power forward. With the opponent filling the
+    camera, the camera steers that push straight into it. With nothing in front, drive
+    forward off the edge and turn back into the ring.
+  - Opponent in contact AND tape ahead -> the OPPONENT is the one at the edge, so in
+    attack mode keep pushing instead of backing off.
+  - Out: when we're shoved backward, the back sensor leaves the ring BEFORE the rest of
+    the robot. So off-the-ring only counts as "fully out" once the camera also sees the
+    tape in front of us (the whole robot is past it), or after OUT_TIME_LONG if the
+    camera is silent.
 
 The policy is a behavior tree, checked top to bottom 20 times a second:
     Selector
-    |- out of the ring?                  -> stop, play the sad song
-    |- in the middle of a maneuver?      -> keep doing it
-    |- on tape + opponent in contact + attack mode -> finish the push
-    |- on tape?                          -> back up, turn away from the tape
-    |- opponent seen?                    -> charge (camera aim blended with driver bias)
-    |- tape ahead (camera)?              -> veer away from it
-    `- otherwise                         -> search, spinning toward the driver's side
+    |- out of the ring?                        -> stop, play the sad song
+    |- back on tape + opponent in contact?     -> being pushed out: full power back at it
+    |- back on tape?                           -> full power forward off the edge, then turn
+    |- in the middle of a maneuver?            -> keep doing it
+    |- opponent in contact + attack mode?      -> full-power push (even at the edge)
+    |- lots of tape ahead (camera)?            -> back up, turn away from the tape
+    |- opponent seen?                          -> charge (camera aim blended with driver bias)
+    |- a little tape ahead (camera)?           -> veer away from it
+    `- otherwise                               -> search, spinning toward the driver's side
 """
 
 import argparse
@@ -56,7 +63,9 @@ sys.path.insert(0, str(ME193 / "MQTT"))    # mqttlib.py
 MOTOR_CARD = None        # None = first Double Motor found
 COLOR_CARD = None
 CONTROLLER_CARD = None
-DRIVE_SIGN = 1           # set to -1 if "forward" drives the robot backward
+USE_CONTROLLER = False   # TODO: set True once the controller is back
+NO_CONTROLLER_LEVERS = (1.0, 0.0)   # without it: full attack, no side bias
+MOTOR_BACKWARD = True    # the Double Motor faces the back of the robot (flips forward AND left/right)
 
 # ---- MQTT ----
 MQTT_TOPIC = "ME193/Rogers/MK"
@@ -65,11 +74,13 @@ VISION_TIMEOUT = 0.5     # camera data older than this (s) is ignored
 # ---- Color sensor (TODO: tune with --readings on the real ring) ----
 TAPE_COLOR = "Blue"
 OFF_REFLECTION_DIFF = 15 # reflection this far from the ring floor = off the ring
-OUT_TIME = 1.0           # off the ring this long (s) = we lost
+OUT_TIME = 0.5           # back off the ring this long + camera sees tape ahead = we lost
+OUT_TIME_LONG = 2.5      # back off the ring this long = we lost, whatever the camera says
 
 # ---- Camera thresholds ----
 CONTACT_SIZE = 0.25      # opponent covers this much of the ground area = touching us
-TAPE_AHEAD = 0.08        # this much blue in the bottom strip = edge coming up
+TAPE_AHEAD = 0.08        # this much blue in the bottom strip = edge coming up (veer)
+TAPE_CLOSE = 0.25        # this much = right at the edge (back up)
 
 # ---- Driving (Double Motor speeds are -100..100) ----
 LOOP_HZ = 20
@@ -78,7 +89,10 @@ PUSH_SPEED = 100
 TURN_GAIN = 40           # how hard to steer toward the opponent
 SEARCH_TURN = 35
 VEER_SPEED, VEER_TURN = 30, 40
-BACKUP = [(-60, -60, 0.5), (50, -50, 0.4)]   # (left, right, seconds): back up, then turn
+# Maneuvers: (left, right, seconds) steps. A step with left != right is a turn; its
+# direction is chosen when the maneuver starts.
+FRONT_EDGE_MOVE = [(-60, -60, 0.5), (50, -50, 0.4)]   # tape ahead: back up, then turn
+BACK_EDGE_MOVE = [(100, 100, 0.6), (50, -50, 0.4)]    # back on tape: full power forward, then turn
 DRIVER_SHARE = 0.3       # how much the driver's side bias counts vs. the camera's aim
 
 SUCCESS, FAILURE, RUNNING = "SUCCESS", "FAILURE", "RUNNING"
@@ -164,17 +178,19 @@ def clip(v):
 # ---- Conditions ----
 
 def is_out(bb):
+    """Back sensor off the ring AND (camera sees the tape in front, or it's been a while)."""
     now = time.monotonic()
-    off_long = bb.off_since is not None and now - bb.off_since > OUT_TIME
+    off_for = now - bb.off_since if bb.off_since is not None else 0.0
+    fully_past_tape = off_for > OUT_TIME and bb.tape_ahead > TAPE_AHEAD
     driver_says = bb.give_up_since is not None and now - bb.give_up_since > 1.0
-    return bb.lost or off_long or driver_says
+    return bb.lost or fully_past_tape or off_for > OUT_TIME_LONG or driver_says
 
 def maneuvering(bb):
     while bb.maneuver and time.monotonic() > bb.maneuver[0][2]:
         bb.maneuver.pop(0)
     return bool(bb.maneuver)
 
-def on_tape(bb):
+def back_on_tape(bb):
     return bb.floor == "tape"
 
 def in_contact(bb):
@@ -188,6 +204,9 @@ def opponent_seen(bb):
 
 def tape_ahead(bb):
     return bb.tape_ahead > TAPE_AHEAD
+
+def tape_close(bb):
+    return bb.tape_ahead > TAPE_CLOSE
 
 
 # ---- Actions ----
@@ -206,17 +225,36 @@ def continue_maneuver(bb):
 def push(bb):
     bb.drive = (PUSH_SPEED, PUSH_SPEED)
 
-def back_off_edge(bb):
-    """Back up, then turn AWAY from the side the camera saw the tape on."""
-    away = -1 if bb.tape_x > 0 else 1     # tape on the right -> turn left
+def start_maneuver(bb, steps, turn):
+    """Queue a maneuver. turn = +1 makes its turning step go right, -1 left."""
     t = time.monotonic()
     bb.maneuver = []
-    for left, right, secs in BACKUP:
+    for left, right, secs in steps:
         if left != right:                 # the turning step
-            left, right = away * abs(left), -away * abs(right)
+            left, right = turn * abs(left), -turn * abs(right)
         t += secs
         bb.maneuver.append((left, right, t))
     continue_maneuver(bb)
+
+def driver_side(bb):
+    return -1 if bb.side_bias < 0 else 1
+
+def back_off_front_edge(bb):
+    """Back up, then turn AWAY from the side the camera saw the tape on.
+    (If the back reaches the tape while backing up, the back-edge branch takes over.)"""
+    start_maneuver(bb, FRONT_EDGE_MOVE, -1 if bb.tape_x > 0 else 1)
+
+def leave_back_edge(bb):
+    """Drive forward off the tape behind us. The camera can't see that tape, so the
+    turn goes toward the driver's side."""
+    start_maneuver(bb, BACK_EDGE_MOVE, driver_side(bb))
+
+def push_back(bb):
+    """Being shoved out backward: full power forward, steered at the opponent by the camera
+    so we push straight into it instead of sliding off to one side."""
+    bb.maneuver = []
+    aim = bb.opp_x
+    bb.drive = (clip(PUSH_SPEED + TURN_GAIN * aim), clip(PUSH_SPEED - TURN_GAIN * aim))
 
 def charge(bb):
     """Shared control: the camera aims, the driver nudges the aim and sets the speed."""
@@ -235,10 +273,13 @@ def search(bb):
 
 TREE = Selector(
     Sequence(Condition("out", is_out), Action("OUT - sad song", lose)),
-    Sequence(Condition("maneuvering", maneuvering), Action("backing off edge", continue_maneuver)),
-    Sequence(Condition("on tape", on_tape), Condition("contact", in_contact),
-             Condition("attack mode", attack_mode), Action("FINISH THE PUSH", push)),
-    Sequence(Condition("on tape", on_tape), Action("edge! backing off", back_off_edge)),
+    Sequence(Condition("back on tape", back_on_tape), Condition("contact", in_contact),
+             Action("PUSHED! pushing back", push_back)),
+    Sequence(Condition("back on tape", back_on_tape), Action("back edge: forward", leave_back_edge)),
+    Sequence(Condition("maneuvering", maneuvering), Action("edge maneuver", continue_maneuver)),
+    Sequence(Condition("contact", in_contact), Condition("attack mode", attack_mode),
+             Action("FULL PUSH", push)),
+    Sequence(Condition("tape close", tape_close), Action("front edge: backing up", back_off_front_edge)),
     Sequence(Condition("opponent seen", opponent_seen), Action("charge", charge)),
     Sequence(Condition("tape ahead", tape_ahead), Action("veer from edge", veer_from_tape)),
     Action("search", search),
@@ -271,6 +312,15 @@ class Vision:
         return self.latest
 
 
+def motor_speeds(left, right):
+    """Robot (left, right) wheel speeds -> the Double Motor's own (left, right).
+    If the motor faces backward, its left wheel is the robot's right wheel and
+    its forward is the robot's backward."""
+    if MOTOR_BACKWARD:
+        return -right, -left
+    return left, right
+
+
 class LegoRobot:
     def __init__(self):
         import legoeducation as le
@@ -281,9 +331,13 @@ class LegoRobot:
         print("Connecting to the color sensor...")
         self.color = colorSensor()
         self.color.connect(card_serial=COLOR_CARD)
-        print("Connecting to the controller...")
-        self.controller = controller()
-        self.controller.connect(card_serial=CONTROLLER_CARD)
+        self.controller = None
+        if USE_CONTROLLER:
+            print("Connecting to the controller...")
+            self.controller = controller()
+            self.controller.connect(card_serial=CONTROLLER_CARD)
+        else:
+            print("No controller (USE_CONTROLLER = False): full attack, no side bias.")
         print("All LEGO parts connected.")
         self._last = None
 
@@ -291,11 +345,13 @@ class LegoRobot:
         return self.color.detect_color(), self.color.reflection()
 
     def levers(self):
+        if self.controller is None:
+            return NO_CONTROLLER_LEVERS
         return self.controller.left_position() / 100, self.controller.right_position() / 100
 
     def drive(self, left, right):
         if (left, right) != self._last:       # only send changes over Bluetooth
-            self.motor.movement_move_tank(DRIVE_SIGN * left, DRIVE_SIGN * right, blocking=False)
+            self.motor.movement_move_tank(*motor_speeds(left, right), blocking=False)
             self._last = (left, right)
 
     def stop(self):
