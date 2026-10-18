@@ -1,4 +1,4 @@
-"""Robot Sumo - the laptop "brain": a behavior tree with sensors and shared control.
+"""Robot Sumo - the laptop "brain": a behavior tree with sensor fusion and shared control.
 
 Run (from the ME193 folder):
     le-venv/bin/python "Project 5 - Robot Sumo/sumo_brain.py"              # the real match
@@ -11,21 +11,35 @@ Three layers of communication:
      - LEGO color sensor on the BACK, pointing down: is the back of the robot on the blue tape?
      - Double Motor's IMU: a sudden backward jolt we didn't cause = pushed from the front;
        tilted far from how it sat at startup = tipped over.
-  2. The UNO Q camera app (ArduinoApps "sumo-vision"): it finds the opponent and asks you
-     to approve it on its web page. The laptop never charges on its own; it waits for the
-     app's messages on ME193/Rogers/MK:
+  2. The UNO Q camera app (ArduinoApps "sumo-vision") + YOU: it finds the opponent and asks
+     you before anything happens. Its questions show up in THIS terminal (with a beep);
+     answer here, and the answer goes back to the app over MQTT (any network works):
+         Enter  = approve ("Opponent?" -> charge, "We're OUT?" -> sad song)
+         Delete = reject (or, with no question open, stop a charge)
+         o      = we're out, right now
+     (The app's web page at http://<board-ip>:7000 works too, if the laptop can reach the
+     board.) The laptop never charges on its own; it waits for the app's messages on
+     ME193/Rogers/MK:
          {"charge": true}   -> charge straight ahead for CHARGE_TIME seconds (each new
                                message restarts the timer, so repeating it keeps charging)
          {"charge": false}  -> stop charging now
          {"out": true}      -> you approved "we're out": stop and play the sad song
-     Every other message (like the camera's opp_seen numbers) is ignored.
+         {"out": false}     -> you rejected "we're out": false alarm, keep wrestling
+     From the camera's raw numbers the laptop only uses tape_ahead (for "out", below).
   3. LEGO controller (teleop): an ABSOLUTE OVERRIDE. Touch either lever and you drive
      (tank style: left lever = left wheels, right lever = right wheels), ignoring everything
      else. Let go of both and the behavior tree takes back over.
 
+Sensor fusion - are we out? The floor is the same inside and outside the ring, so only the
+tape tells us. When we're shoved out backward, the BACK color sensor crosses the tape first
+(sees blue, then floor again). If the FRONT camera THEN sees the tape in front of us, the
+tape is in front AND behind us crossed: the whole robot is past it. The robot stops on its
+own and sends {"out_detected": true}; the app asks you, and Approve plays the sad song.
+
 The policy is a behavior tree, checked top to bottom 20 times a second:
     Selector
     |- the app said we're out?                 -> stop, play the sad song, quit
+    |- back crossed tape + camera sees tape?   -> OUT: stop on its own, ask the app for the song
     |- a controller lever moved?               -> the driver drives (absolute override)
     |- tipped over (IMU)?                      -> stop until it's back on its wheels
     |- back on tape?                           -> full power forward off the edge, then turn
@@ -38,6 +52,8 @@ The policy is a behavior tree, checked top to bottom 20 times a second:
 import argparse
 import json
 import math
+import os
+import queue
 import struct
 import subprocess
 import sys
@@ -65,6 +81,13 @@ CHARGE_TIME = 1.5        # one {"charge": true} charges this long (s); another o
 
 # ---- Color sensor (TODO: tune with --readings on the real ring) ----
 TAPE_COLOR = "Blue"
+
+# ---- Out (sensor fusion: back color sensor + front camera) ----
+OUT_WINDOW = 3.0         # the back must have seen blue within this many seconds...
+TAPE_AHEAD = 0.08        # ...and the camera must see at least this much tape ahead...
+OUT_CONFIRM = 0.3        # ...for this long (s) in a row = we're out
+OUT_IGNORE = 3.0         # after you reject "out", don't stop for it again for this long (s)
+VISION_TIMEOUT = 0.5     # camera numbers older than this (s) are ignored
 
 # ---- IMU (TODO: tune with --imu) ----
 IMU_AXIS = "accelerometerX"   # the Double Motor accelerometer axis along the driving direction
@@ -151,7 +174,12 @@ class Blackboard:
         self.lever_left = 0.0        # controller, -1 .. +1
         self.lever_right = 0.0
         self.charge_until = 0.0      # the app said charge: charging until this time
-        self.out = False             # the app said we're out
+        self.back_saw_tape_at = None # last time the back sensor saw blue
+        self.tape_ahead = 0.0        # camera: how much tape is right in front
+        self.out_since = None        # back crossed the tape + camera sees it, since when
+        self.out_detected = False    # fusion says we're out: stopped, waiting for the app
+        self.out_ignore_until = 0.0  # you rejected "out": ignore it until this time
+        self.out = False             # the app said we're out (play the song)
         self.lost = False            # sad song played
         # outputs / memory
         self.drive = (0, 0)
@@ -176,6 +204,9 @@ def angle_between(u, v):
 
 def is_out(bb):
     return bb.out
+
+def out_detected(bb):
+    return bb.out_detected
 
 def tipped_over(bb):
     return bb.tipped
@@ -207,6 +238,12 @@ def lose(bb):
         bb.lost = True
         print("\nOUT OF THE RING. Stopping.")
         play_sad_song()
+
+def stop_out(bb):
+    """Fusion says we're out: stop and wait for the app (Approve = sad song, Reject = resume)."""
+    bb.maneuver = []
+    bb.charge_until = 0.0
+    bb.drive = (0, 0)
 
 def stop_tipped(bb):
     """Stop until the robot is back on its wheels."""
@@ -252,6 +289,7 @@ def wait(bb):
 
 TREE = Selector(
     Sequence(Condition("out", is_out), Action("OUT - sad song", lose)),
+    Sequence(Condition("out detected", out_detected), Action("OUT? stopped, ask app", stop_out)),
     Sequence(Condition("lever moved", driver_override), Action("DRIVER OVERRIDE", driver_drives)),
     Sequence(Condition("tipped over", tipped_over), Action("TIPPED OVER - stop", stop_tipped)),
     Sequence(Condition("back on tape", back_on_tape), Action("back edge: forward", leave_back_edge)),
@@ -263,16 +301,64 @@ TREE = Selector(
 
 
 # ---------------------------------------------------------------------------
+# Keyboard
+# ---------------------------------------------------------------------------
+
+class Keyboard:
+    """Reads single keys from this terminal without waiting for a whole line."""
+
+    def __init__(self):
+        self.keys = queue.Queue()
+        self._old = None
+        if not sys.stdin.isatty():
+            print("(no terminal keyboard: keys won't work)")
+            return
+        import termios
+        import tty
+        self._fd = sys.stdin.fileno()
+        self._old = termios.tcgetattr(self._fd)
+        tty.setcbreak(self._fd)               # keys arrive one at a time; Ctrl+C still works
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        while True:
+            data = os.read(self._fd, 16)
+            if b"\n" in data or b"\r" in data:
+                self.keys.put("enter")
+            elif b"\x7f" in data or b"\x08" in data or b"\x1b[3~" in data:   # Delete / fn+Delete
+                self.keys.put("delete")
+            elif b" " in data:
+                self.keys.put("space")
+            elif b"o" in data or b"O" in data:
+                self.keys.put("o")
+
+    def pressed(self):
+        out = []
+        while not self.keys.empty():
+            out.append(self.keys.get())
+        return out
+
+    def restore(self):
+        if self._old is not None:
+            import termios
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+
+
+# ---------------------------------------------------------------------------
 # Sensors and motors
 # ---------------------------------------------------------------------------
 
 class AppLink:
-    """Charge and "out" commands from the UNO Q app over MQTT."""
+    """Charge and "out" commands from the UNO Q app over MQTT, plus the camera's tape_ahead."""
 
     def __init__(self):
         from mqttlib import MQTTClient
         self.charge_until = 0.0
         self.out = False
+        self.out_rejected = False             # you rejected "out" (read and cleared by sense())
+        self.ask = None                       # the app's open question: "opponent", "out" or None
+        self.answered_at = 0.0                # when you last answered (the app needs a moment)
+        self._tape_ahead, self._tape_at = 0.0, 0.0
         self.client = MQTTClient().connect()
         self.client.subscribe(MQTT_TOPIC, self._on_message)
         print(f"MQTT: waiting for the app's charge messages on {MQTT_TOPIC}")
@@ -284,17 +370,56 @@ class AppLink:
             return
         if not isinstance(msg, dict):
             return
-        if msg.get("out"):
+        if "tape_ahead" in msg:
+            self._tape_ahead, self._tape_at = msg["tape_ahead"], time.monotonic()
+            if time.monotonic() - self.answered_at > 0.5:   # skip the stale question
+                self.ask = msg.get("ask")
+        if msg.get("out") is True:
             self.out = True
             print(">> app: WE'RE OUT")
+        elif msg.get("out") is False:
+            self.out_rejected = True
+            print(">> app: not out, keep going")
         if "charge" not in msg:
             return                            # camera numbers etc.: not a charge command
         if msg["charge"]:
+            if time.monotonic() > self.charge_until:   # print only when a charge starts
+                print(">> app: CHARGE")
             self.charge_until = time.monotonic() + CHARGE_TIME
-            print(">> app: CHARGE")
         else:
             self.charge_until = 0.0
             print(">> app: stop charging")
+
+    def tape_ahead(self):
+        if time.monotonic() - self._tape_at > VISION_TIMEOUT:
+            return 0.0                        # camera silent
+        return self._tape_ahead
+
+    def send(self, msg):
+        self.client.publish(MQTT_TOPIC, json.dumps(msg))
+
+
+QUESTIONS = {
+    "opponent": "Camera sees an OPPONENT. Enter = charge, Delete = not the opponent",
+    "out": "We're OUT? Enter = sad song, Delete = keep wrestling",
+}
+
+
+def answer_keys(app, keyboard, last_ask):
+    """Show the app's question here and send your Enter / Delete back to it.
+    Returns the question that is open now (to spot new ones)."""
+    ask = app.ask
+    if ask != last_ask and ask in QUESTIONS:
+        print(f"\a?? {QUESTIONS[ask]}", flush=True)
+    for key in keyboard.pressed():
+        if key == "o":
+            app.send({"answer": "out_now"})
+        elif key in ("enter", "delete") and ask:
+            app.send({"answer": f"{'approve' if key == 'enter' else 'reject'}_{ask}"})
+            app.ask, app.answered_at = None, time.monotonic()   # don't double-send or re-ask
+        elif key == "delete" and time.monotonic() < app.charge_until:
+            app.send({"answer": "stop_charge"})
+    return app.ask
 
 
 def set_speed_scale(scale):
@@ -417,11 +542,33 @@ class NoLego:
 
 
 def sense(bb, robot, app):
-    """Read every sensor (and the app's command) into the blackboard."""
+    """Read every sensor (and the app's commands) into the blackboard."""
+    now = time.monotonic()
     color, _ = robot.floor_reading()
     bb.floor = "tape" if color == TAPE_COLOR else "floor"
+    if bb.floor == "tape":
+        bb.back_saw_tape_at = now
+    bb.tape_ahead = app.tape_ahead()
     bb.charge_until = app.charge_until
     bb.out = app.out
+
+    # Sensor fusion: the back crossed the tape (saw blue, now past it) AND the front camera
+    # sees tape, for OUT_CONFIRM seconds in a row -> we're out. Stop and ask the app.
+    if app.out_rejected:
+        app.out_rejected = False
+        bb.out_detected, bb.out_ignore_until = False, now + OUT_IGNORE
+    crossed = (bb.back_saw_tape_at is not None and bb.floor != "tape"
+               and now - bb.back_saw_tape_at < OUT_WINDOW)
+    if crossed and bb.tape_ahead > TAPE_AHEAD:
+        bb.out_since = bb.out_since or now
+    else:
+        bb.out_since = None
+    if (not bb.out_detected and bb.out_since is not None and now - bb.out_since > OUT_CONFIRM
+            and now > bb.out_ignore_until):
+        bb.out_detected = True
+        app.send({"out_detected": True})
+        print("\nOUT? Back crossed the tape and the camera sees it ahead. Stopped.")
+
     bb.pushed_front = robot.pushed_from_front()
     bb.tipped = robot.tipped_over()
     bb.lever_left, bb.lever_right = robot.levers()
@@ -493,6 +640,7 @@ def main():
     set_speed_scale(args.speed)
 
     robot = NoLego() if args.no_lego else LegoRobot()
+    keyboard = None
     try:
         if args.readings:
             print_readings(robot)
@@ -503,16 +651,19 @@ def main():
         print("Place the robot inside the ring and hold it still...")
         while not getattr(robot, "imu_ready", True):   # IMU learning its resting value
             time.sleep(0.05)
-        print("GO!  (sitting still until the app says charge; Ctrl+C = quit)")
+        keyboard = Keyboard()
+        print("GO!  Sitting still until the app says charge. Answer its questions here:")
+        print("     Enter = yes, Delete = no / stop charge, o = we're out, Ctrl+C = quit")
 
         bb = Blackboard()
-        last_active = None
+        last_active, last_ask = None, None
         while True:
+            last_ask = answer_keys(app, keyboard, last_ask)
             sense(bb, robot, app)
             TREE.tick(bb)
             robot.drive(*bb.drive)
             if bb.active != last_active:    # print only when the decision changes
-                print(f"[{bb.active:22s}] floor={bb.floor:5s} "
+                print(f"[{bb.active:22s}] floor={bb.floor:5s} tape_ahead={bb.tape_ahead:.2f} "
                       f"levers={bb.lever_left:+.1f}/{bb.lever_right:+.1f}")
                 last_active = bb.active
             if bb.lost:
@@ -523,6 +674,8 @@ def main():
         print("\nStopped.")
     finally:
         robot.stop()
+        if keyboard:
+            keyboard.restore()
 
 
 if __name__ == "__main__":

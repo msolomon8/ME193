@@ -21,11 +21,11 @@ socket.on('disconnect', () => { statusEl.textContent = 'Disconnected'; });
 socket.on('view', (v) => {
   viewEl.src = 'data:image/jpeg;base64,' + v.jpg;
 
-  if (v.out_state === 'asking') question = 'out';
+  if (v.out_state === 'asking') question = 'out';   // the laptop stopped: back sensor + camera both saw tape
   else if (v.opp_state === 'asking') question = 'opponent';
   else question = null;
 
-  if (question === 'out') questionText.textContent = "We're OUT of the ring? (plays the sad song)";
+  if (question === 'out') questionText.textContent = "Robot stopped: back sensor and camera both saw the tape. We're OUT? (Approve = sad song, Reject = keep going)";
   if (question === 'opponent') questionText.textContent = 'Is the green outline the OPPONENT? (charge)';
   questionBox.className = question ? question : 'hidden';
 

@@ -1,21 +1,33 @@
 # Robot Sumo - UNO Q vision + approval (Linux side, runs in Arduino App Lab)
 # The UNO Q never drives. It reads the Logitech webcam on the FRONT of the robot, finds
-# the opponent and the blue tape, and asks YOU (on its web page) before anything happens:
+# the opponent and the blue tape, and asks YOU before anything happens. You answer with
+# Enter / Delete in the laptop's sumo_brain.py terminal (works on any network, through MQTT),
+# or on this app's web page if your laptop can reach the board:
 #
-#   Web page: http://<board-ip>:7000  (shows the camera, what it detects, and the questions)
+#   Web page: http://<board-ip>:7000  (shows the camera, what it detects, and the questions;
+#             needs a network where the laptop can reach the board - Tufts WiFi can't)
 #     "Opponent?"  Approve (Enter) -> the app tells the laptop to charge while it still
 #                                     sees the opponent
 #                  Reject (Delete) -> ignored; asks again after IGNORE_TIME if still seen
-#     "We're OUT?" Approve (Enter) -> the app tells the laptop we lost (stop + sad song)
-#                  Reject (Delete) -> ignored for IGNORE_TIME
+#     "We're OUT?" asked when the LAPTOP says {"out_detected": true}: its back color sensor
+#                  crossed the tape and this camera now sees tape ahead (sensor fusion), so
+#                  the robot already stopped on its own.
+#                  Approve (Enter) -> the app tells the laptop we lost (sad song)
+#                  Reject (Delete) -> false alarm: the laptop keeps wrestling
 #     Buttons for "Stop charge", "We're out" (any time) and "Relearn floor" are there too.
 #
 # MQTT commands to the laptop (topic ME193/Rogers/MK, see sumo_brain.py in ME193):
 #   {"charge": true}   about 10 per second while an approved opponent is in view
 #   {"charge": false}  approved opponent lost for LOST_TIME, rejected, or stopped
-#   {"out": true}      you approved "we're out"
-# Plus the raw numbers, about 10 per second (the laptop ignores these):
-#   {"opp_seen": true, "opp_x": -0.3, "opp_size": 0.12, "tape_ahead": 0.05, "tape_x": 0.4}
+#   {"out": true}      you approved "we're out" (or pressed "We're out")
+#   {"out": false}     you rejected "we're out"
+# and listens on the same topic for the laptop's messages:
+#   {"out_detected": true}             the laptop's sensors say we're out -> ask "We're OUT?"
+#   {"answer": "approve_opponent"}     your Enter / Delete in the laptop terminal (same
+#                                      actions as the web page's buttons)
+# Plus the raw numbers and the open question, about 10 per second:
+#   {"opp_seen": true, "opp_x": -0.3, "opp_size": 0.12, "tape_ahead": 0.05, "tape_x": 0.4,
+#    "ask": "opponent"}               ask: "opponent", "out" or null (no question open)
 #   opp_x / tape_x: -1 = far left of the image, 0 = center, +1 = far right
 #   opp_size:       fraction of the ground area the opponent covers (bigger = closer)
 #   tape_ahead:     fraction of the bottom of the image that is blue tape
@@ -59,8 +71,6 @@ MIN_OPP_AREA = 0.02  # ignore blobs smaller than this fraction of the ground are
 # ---- Approval ----
 LOST_TIME = 1.0      # approved opponent out of view this long (s) -> stop charging, ask again next time
 IGNORE_TIME = 2.0    # after Reject, don't ask the same question again for this long (s)
-OUT_TAPE = 0.5       # tape covers this much of the bottom strip -> ask "we're out?"
-OUT_CONFIRM = 0.3    # ...for this long (s) in a row
 
 # ---- Web page ----
 VIEW_EVERY = 0.2     # seconds between pictures sent to the web page
@@ -70,20 +80,14 @@ floor_bgr = None
 last_seen = None
 view_sent_at = 0.0
 
-# Approval state (changed by the web page's buttons)
+# Approval state (changed by your answers)
 opp_state = "none"          # "none", "asking", "approved"
 opp_ignore_until = 0.0
 opp_last_seen = 0.0
-out_state = "none"          # "none", "asking", "sent"
-out_ignore_until = 0.0
-out_since = None
+out_state = "none"          # "none", "asking" (laptop detected out), "sent"
 
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
-client.connect(BROKER, PORT, keepalive=30)
-client.loop_start()
-print(f"MQTT connected, publishing to {TOPIC}")
-
 ui = WebUI()
 
 
@@ -93,8 +97,9 @@ def command(msg):
 
 
 def on_answer(sid, data):
-    """A button (or Enter / Delete) on the web page."""
-    global opp_state, opp_ignore_until, out_state, out_ignore_until, floor_bgr
+    """Your answer: a button (or Enter / Delete) on the web page, or Enter / Delete in the
+    laptop terminal (arrives over MQTT, see on_mqtt)."""
+    global opp_state, opp_ignore_until, out_state, floor_bgr
     action = data.get("action") if isinstance(data, dict) else data
     now = time.monotonic()
     if action in ("approve_out", "out_now"):
@@ -104,7 +109,9 @@ def on_answer(sid, data):
             command({"charge": False})
             command({"out": True})
     elif action == "reject_out":
-        out_state, out_ignore_until = "none", now + IGNORE_TIME
+        if out_state == "asking":
+            out_state = "none"
+            command({"out": False})
     elif action == "approve_opponent":
         if opp_state == "asking":
             opp_state = "approved"
@@ -120,6 +127,40 @@ def on_answer(sid, data):
 
 
 ui.on_message("answer", on_answer)
+
+
+def on_mqtt(client, userdata, msg):
+    """Messages from the laptop: its sensors think we're out (it has already stopped), or
+    your Enter / Delete from its terminal."""
+    global out_state
+    try:
+        data = json.loads(msg.payload)
+    except ValueError:
+        return
+    if not isinstance(data, dict):
+        return
+    if data.get("out_detected") and out_state == "none":
+        out_state = "asking"
+        print("Laptop: we're out? (waiting for your answer)")
+    if isinstance(data.get("answer"), str):
+        print("Laptop answered:", data["answer"])
+        on_answer(None, {"action": data["answer"]})
+
+
+def open_question():
+    """What the app is asking right now: "out" wins over "opponent"."""
+    if out_state == "asking":
+        return "out"
+    if opp_state == "asking":
+        return "opponent"
+    return None
+
+
+client.on_message = on_mqtt
+client.on_connect = lambda c, u, f, rc, p=None: c.subscribe(TOPIC)
+client.connect(BROKER, PORT, keepalive=30)
+client.loop_start()
+print(f"MQTT connected, publishing to {TOPIC}")
 
 
 def webcam_devices():
@@ -185,9 +226,9 @@ def find_opponent(frame, hsv):
     return True, x_of(blob), size, mask, biggest
 
 
-def update_approval(opp_seen, tape_ahead):
-    """Raise questions for the web page, and keep an approved charge going."""
-    global opp_state, opp_last_seen, out_state, out_since
+def update_approval(opp_seen):
+    """Raise the opponent question for the web page, and keep an approved charge going."""
+    global opp_state, opp_last_seen
     now = time.monotonic()
     if out_state == "sent":
         return
@@ -196,7 +237,7 @@ def update_approval(opp_seen, tape_ahead):
         opp_last_seen = now
     if opp_state == "none" and opp_seen and now > opp_ignore_until:
         opp_state = "asking"
-        print("Opponent? (waiting for approve / reject on the web page)")
+        print("Opponent? (waiting for your answer)")
     elif opp_state == "asking" and now - opp_last_seen > LOST_TIME:
         opp_state = "none"                      # it went away before you answered
     elif opp_state == "approved":
@@ -205,17 +246,6 @@ def update_approval(opp_seen, tape_ahead):
             command({"charge": False})
         elif opp_seen:
             client.publish(TOPIC, json.dumps({"charge": True}))   # keep the charge going
-    # Out
-    if tape_ahead > OUT_TAPE:
-        out_since = out_since or now
-    else:
-        out_since = None
-    if (out_state == "none" and out_since is not None and now - out_since > OUT_CONFIRM
-            and now > out_ignore_until):
-        out_state = "asking"
-        print("We're out? (waiting for approve / reject on the web page)")
-    elif out_state == "asking" and out_since is None:
-        out_state = "none"                      # tape went away before you answered
 
 
 def send_view(frame, hsv, opp_mask, biggest, opp_seen, opp_size, tape_ahead):
@@ -295,8 +325,9 @@ def loop():
     client.publish(TOPIC, json.dumps({
         "opp_seen": opp_seen, "opp_x": round(opp_x, 2), "opp_size": round(opp_size, 3),
         "tape_ahead": round(tape_ahead, 3), "tape_x": round(tape_x, 2),
+        "ask": open_question(),
     }))
-    update_approval(opp_seen, tape_ahead)
+    update_approval(opp_seen)
 
     if opp_seen != last_seen:                   # print only when it changes
         print("OPPONENT SEEN" if opp_seen else "no opponent")
