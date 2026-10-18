@@ -1,16 +1,19 @@
 """Robot Sumo - the laptop "brain": a behavior tree with sensor fusion and shared control.
 
 Run (from the ME193 folder):
-    le-venv/bin/python "Robot Sumo/sumo_brain.py"              # the real match
-    le-venv/bin/python "Robot Sumo/sumo_brain.py" --readings   # print color sensor readings (for tuning)
-    le-venv/bin/python "Robot Sumo/sumo_brain.py" --no-lego    # test the tree with only the camera
+    le-venv/bin/python "Project 5 - Project 5 - Robot Sumo/sumo_brain.py"              # the real match
+    le-venv/bin/python "Project 5 - Project 5 - Robot Sumo/sumo_brain.py" --readings   # print color sensor readings (for tuning)
+    le-venv/bin/python "Project 5 - Project 5 - Robot Sumo/sumo_brain.py" --imu        # print accelerometer readings (for tuning)
+    le-venv/bin/python "Project 5 - Project 5 - Robot Sumo/sumo_brain.py" --no-lego    # test the tree with only the camera
 
 Inputs:
   - LEGO color sensor on the BACK, pointing down (autonomous): is the back of the robot on
-    the ring floor, on the blue tape, or off the ring?
+    the blue tape?
   - Logitech webcam on the FRONT, on the UNO Q (autonomous): where the opponent is and
     whether blue tape is coming up. It arrives over MQTT on ME193/Rogers/MK from the
     ArduinoApps "sumo-vision" app.
+  - Double Motor's IMU (autonomous): a sudden backward jolt we didn't cause = we just got
+    hit or pushed from the front.
   - LEGO controller (teleop): the driver's strategy.
         left lever  = aggression: up = attack, down = defend
         right lever = side bias:  up = favor turning right, down = favor left
@@ -23,12 +26,17 @@ Sensor fusion: the camera watches the front, the color sensor watches the back.
     pushed, so the answer is always full power forward. With the opponent filling the
     camera, the camera steers that push straight into it. With nothing in front, drive
     forward off the edge and turn back into the ring.
+  - Pushed from the front: the IMU feels the jolt even when the camera misses the
+    opponent. The answer is full power forward for PUSH_HOLD seconds, steered at the
+    opponent if the camera sees it. Braking makes the same jolt, so jolts right after
+    we slow down on purpose are ignored.
   - Opponent in contact AND tape ahead -> the OPPONENT is the one at the edge, so in
     attack mode keep pushing instead of backing off.
-  - Out: when we're shoved backward, the back sensor leaves the ring BEFORE the rest of
-    the robot. So off-the-ring only counts as "fully out" once the camera also sees the
-    tape in front of us (the whole robot is past it), or after OUT_TIME_LONG if the
-    camera is silent.
+  - Out: the floor is the same inside and outside the ring, so only the tape tells us.
+    When we're shoved out backward, the back sensor crosses the tape first (sees blue,
+    then floor again). If the front camera THEN sees the tape in front of us, the whole
+    robot is past it: we're out. Without the camera there's no automatic "out"; use the
+    controller's both-levers-down instead.
 
 The policy is a behavior tree, checked top to bottom 20 times a second:
     Selector
@@ -36,6 +44,7 @@ The policy is a behavior tree, checked top to bottom 20 times a second:
     |- back on tape + opponent in contact?     -> being pushed out: full power back at it
     |- back on tape?                           -> full power forward off the edge, then turn
     |- in the middle of a maneuver?            -> keep doing it
+    |- pushed from the front (IMU)?            -> full power forward, counteracting it
     |- opponent in contact + attack mode?      -> full-power push (even at the edge)
     |- lots of tape ahead (camera)?            -> back up, turn away from the tape
     |- opponent seen?                          -> charge (camera aim blended with driver bias)
@@ -73,16 +82,25 @@ VISION_TIMEOUT = 0.5     # camera data older than this (s) is ignored
 
 # ---- Color sensor (TODO: tune with --readings on the real ring) ----
 TAPE_COLOR = "Blue"
-OFF_REFLECTION_DIFF = 15 # reflection this far from the ring floor = off the ring
-OUT_TIME = 0.5           # back off the ring this long + camera sees tape ahead = we lost
-OUT_TIME_LONG = 2.5      # back off the ring this long = we lost, whatever the camera says
+OUT_WINDOW = 3.0         # the back must have seen blue within this many seconds...
+OUT_CONFIRM = 0.3        # ...and the camera must see tape ahead this long = we lost
 
 # ---- Camera thresholds ----
 CONTACT_SIZE = 0.25      # opponent covers this much of the ground area = touching us
 TAPE_AHEAD = 0.08        # this much blue in the bottom strip = edge coming up (veer)
 TAPE_CLOSE = 0.25        # this much = right at the edge (back up)
 
+# ---- IMU push detection (TODO: tune with --imu) ----
+IMU_AXIS = "accelerometerX"   # the Double Motor accelerometer axis along the driving direction
+IMU_FORWARD_SIGN = 1     # +1 if shoving the robot FORWARD by hand makes that axis go up, else -1
+IMU_INTERVAL_MS = 20     # how often the Double Motor sends IMU readings
+IMU_SMOOTH = 0.5         # 0 = raw, closer to 1 = smoother (but slower to react)
+PUSH_ACCEL = 300         # a backward jolt bigger than this = pushed from the front
+PUSH_HOLD = 0.8          # keep counteracting this long (s) after the jolt
+BRAKE_QUIET = 0.3        # ignore jolts this long (s) after we slow down on purpose
+
 # ---- Driving (Double Motor speeds are -100..100) ----
+SPEED_SCALE = 0.7       # every speed below is multiplied by this (1.0 = full speed); also --speed
 LOOP_HZ = 20
 CHARGE_SPEED = 80
 PUSH_SPEED = 100
@@ -154,13 +172,15 @@ class Selector:
 class Blackboard:
     def __init__(self):
         # sensors
-        self.floor = "ring"          # color sensor: "ring", "tape" or "off"
-        self.off_since = None
+        self.floor = "floor"         # back color sensor: "floor" or "tape"
+        self.back_saw_tape_at = None # last time the back sensor saw blue
+        self.out_since = None        # back crossed the tape + camera sees it, since when
         self.opp_seen = False        # camera
         self.opp_x = 0.0
         self.opp_size = 0.0
         self.tape_ahead = 0.0
         self.tape_x = 0.0
+        self.pushed_front = False    # IMU
         self.aggression = 0.0        # driver, -1 (defend) .. +1 (attack)
         self.side_bias = 0.0         # driver, -1 (left) .. +1 (right)
         self.give_up_since = None
@@ -178,12 +198,11 @@ def clip(v):
 # ---- Conditions ----
 
 def is_out(bb):
-    """Back sensor off the ring AND (camera sees the tape in front, or it's been a while)."""
+    """The back crossed the blue tape AND the front camera now sees it (see sense())."""
     now = time.monotonic()
-    off_for = now - bb.off_since if bb.off_since is not None else 0.0
-    fully_past_tape = off_for > OUT_TIME and bb.tape_ahead > TAPE_AHEAD
+    past_tape = bb.out_since is not None and now - bb.out_since > OUT_CONFIRM
     driver_says = bb.give_up_since is not None and now - bb.give_up_since > 1.0
-    return bb.lost or fully_past_tape or off_for > OUT_TIME_LONG or driver_says
+    return bb.lost or past_tape or driver_says
 
 def maneuvering(bb):
     while bb.maneuver and time.monotonic() > bb.maneuver[0][2]:
@@ -192,6 +211,9 @@ def maneuvering(bb):
 
 def back_on_tape(bb):
     return bb.floor == "tape"
+
+def pushed_front(bb):
+    return bb.pushed_front
 
 def in_contact(bb):
     return bb.opp_seen and bb.opp_size > CONTACT_SIZE
@@ -250,8 +272,9 @@ def leave_back_edge(bb):
     start_maneuver(bb, BACK_EDGE_MOVE, driver_side(bb))
 
 def push_back(bb):
-    """Being shoved out backward: full power forward, steered at the opponent by the camera
-    so we push straight into it instead of sliding off to one side."""
+    """Being shoved backward (back on the tape, or the IMU felt a push from the front): full
+    power forward, steered at the opponent by the camera so we push straight into it
+    instead of sliding off to one side."""
     bb.maneuver = []
     aim = bb.opp_x
     bb.drive = (clip(PUSH_SPEED + TURN_GAIN * aim), clip(PUSH_SPEED - TURN_GAIN * aim))
@@ -277,6 +300,7 @@ TREE = Selector(
              Action("PUSHED! pushing back", push_back)),
     Sequence(Condition("back on tape", back_on_tape), Action("back edge: forward", leave_back_edge)),
     Sequence(Condition("maneuvering", maneuvering), Action("edge maneuver", continue_maneuver)),
+    Sequence(Condition("pushed from front", pushed_front), Action("IMU PUSH! pushing back", push_back)),
     Sequence(Condition("contact", in_contact), Condition("attack mode", attack_mode),
              Action("FULL PUSH", push)),
     Sequence(Condition("tape close", tape_close), Action("front edge: backing up", back_off_front_edge)),
@@ -312,10 +336,17 @@ class Vision:
         return self.latest
 
 
+def set_speed_scale(scale):
+    global SPEED_SCALE
+    SPEED_SCALE = max(0.0, min(1.0, scale))
+    print(f"Speed: {SPEED_SCALE:.0%} of full")
+
+
 def motor_speeds(left, right):
     """Robot (left, right) wheel speeds -> the Double Motor's own (left, right).
     If the motor faces backward, its left wheel is the robot's right wheel and
-    its forward is the robot's backward."""
+    its forward is the robot's backward. SPEED_SCALE slows everything down for testing."""
+    left, right = round(left * SPEED_SCALE), round(right * SPEED_SCALE)
     if MOTOR_BACKWARD:
         return -right, -left
     return left, right
@@ -327,7 +358,7 @@ class LegoRobot:
         from lelib import doubleMotor, colorSensor, controller
         print("Connecting to the Double Motor...")
         self.motor = doubleMotor()
-        self.motor.connect(card_serial=MOTOR_CARD)
+        self.motor.connect(card_serial=MOTOR_CARD, device_notification_delay=IMU_INTERVAL_MS)
         print("Connecting to the color sensor...")
         self.color = colorSensor()
         self.color.connect(card_serial=COLOR_CARD)
@@ -340,6 +371,39 @@ class LegoRobot:
             print("No controller (USE_CONTROLLER = False): full attack, no side bias.")
         print("All LEGO parts connected.")
         self._last = None
+        # IMU push detection runs in its own thread, faster than the tree
+        self.accel = 0.0             # smoothed forward acceleration (minus the resting value)
+        self.imu_ready = False
+        self.pushed_at = None
+        self.quiet_until = 0.0
+        self._running = True
+        threading.Thread(target=self._watch_imu, daemon=True).start()
+
+    def _forward_accel(self):
+        return IMU_FORWARD_SIGN * float(getattr(self.motor.imu_device, IMU_AXIS))
+
+    def _watch_imu(self):
+        """Learn the resting value (robot sitting still at startup), then flag any backward
+        jolt bigger than PUSH_ACCEL that didn't come from us slowing down."""
+        dt = IMU_INTERVAL_MS / 1000
+        rest = []
+        while len(rest) < 25:
+            a = self._forward_accel()
+            if not math.isnan(a):
+                rest.append(a)
+            time.sleep(dt)
+        baseline = sum(rest) / len(rest)
+        self.imu_ready = True
+        while self._running:
+            a = self._forward_accel() - baseline
+            if not math.isnan(a):
+                self.accel = IMU_SMOOTH * self.accel + (1 - IMU_SMOOTH) * a
+                if self.accel < -PUSH_ACCEL and time.monotonic() > self.quiet_until:
+                    self.pushed_at = time.monotonic()
+            time.sleep(dt)
+
+    def pushed_from_front(self):
+        return self.pushed_at is not None and time.monotonic() - self.pushed_at < PUSH_HOLD
 
     def floor_reading(self):
         return self.color.detect_color(), self.color.reflection()
@@ -351,10 +415,14 @@ class LegoRobot:
 
     def drive(self, left, right):
         if (left, right) != self._last:       # only send changes over Bluetooth
+            before = sum(self._last) / 2 if self._last else 0
+            if (left + right) / 2 < before - 10:  # slowing down makes a backward jolt too
+                self.quiet_until = time.monotonic() + BRAKE_QUIET
             self.motor.movement_move_tank(*motor_speeds(left, right), blocking=False)
             self._last = (left, right)
 
     def stop(self):
+        self._running = False
         self.motor.stop()
 
 
@@ -362,27 +430,18 @@ class NoLego:
     """Stand-in for --no-lego: always on the ring floor, levers centered."""
     def floor_reading(self):  return "No color", 50
     def levers(self):         return 0.0, 0.0
+    def pushed_from_front(self): return False
     def drive(self, left, right): pass
     def stop(self):           pass
 
 
-def classify_floor(color, reflection, ring_reflection):
-    if color == TAPE_COLOR:
-        return "tape"
-    if abs(reflection - ring_reflection) > OFF_REFLECTION_DIFF:
-        return "off"
-    return "ring"
-
-
-def sense(bb, robot, vision, ring_reflection):
+def sense(bb, robot, vision):
     """Read every sensor into the blackboard."""
     now = time.monotonic()
-    color, reflection = robot.floor_reading()
-    bb.floor = classify_floor(color, reflection, ring_reflection)
-    if bb.floor == "off":
-        bb.off_since = bb.off_since or now
-    else:
-        bb.off_since = None
+    color, _ = robot.floor_reading()
+    bb.floor = "tape" if color == TAPE_COLOR else "floor"
+    if bb.floor == "tape":
+        bb.back_saw_tape_at = now
 
     cam = vision.get()
     bb.opp_seen = bool(cam and cam.get("opp_seen"))
@@ -390,6 +449,17 @@ def sense(bb, robot, vision, ring_reflection):
     bb.opp_size = cam.get("opp_size", 0.0) if cam else 0.0
     bb.tape_ahead = cam.get("tape_ahead", 0.0) if cam else 0.0
     bb.tape_x = cam.get("tape_x", 0.0) if cam else 0.0
+
+    bb.pushed_front = robot.pushed_from_front()
+
+    # Out = the back crossed the tape (saw blue, now past it) and the camera now sees the
+    # tape in front of us, for OUT_CONFIRM seconds in a row.
+    crossed = (bb.back_saw_tape_at is not None and bb.floor != "tape"
+               and now - bb.back_saw_tape_at < OUT_WINDOW)
+    if crossed and bb.tape_ahead > TAPE_AHEAD:
+        bb.out_since = bb.out_since or now
+    else:
+        bb.out_since = None
 
     bb.aggression, bb.side_bias = robot.levers()
     if bb.aggression <= -0.9 and bb.side_bias <= -0.9:
@@ -438,30 +508,48 @@ def print_readings(robot):
         time.sleep(0.2)
 
 
+def print_imu(robot):
+    print("Keep the robot still while it learns its resting value...")
+    while not robot.imu_ready:
+        time.sleep(0.05)
+    print("Accelerometer readings (Ctrl+C to stop). Shove the robot FORWARD by hand:")
+    print("  the axis that jumps most is IMU_AXIS; if it goes DOWN, set IMU_FORWARD_SIGN = -1.")
+    print("  Then shove it BACKWARD: 'forward' should go negative past PUSH_ACCEL and print PUSH!")
+    imu = robot.motor.imu_device
+    while True:
+        flag = "PUSH!" if robot.pushed_from_front() else "     "
+        print(f"\rX={imu.accelerometerX:7.0f} Y={imu.accelerometerY:7.0f} Z={imu.accelerometerZ:7.0f}"
+              f"   forward={robot.accel:+7.0f}  {flag}", end="", flush=True)
+        time.sleep(0.05)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--readings", action="store_true", help="print color sensor readings")
+    parser.add_argument("--imu", action="store_true", help="print accelerometer readings")
     parser.add_argument("--no-lego", action="store_true", help="run without the LEGO parts")
+    parser.add_argument("--speed", type=float, default=SPEED_SCALE,
+                        help=f"fraction of full speed, e.g. 0.3 (default {SPEED_SCALE})")
     args = parser.parse_args()
+    set_speed_scale(args.speed)
 
     robot = NoLego() if args.no_lego else LegoRobot()
     try:
         if args.readings:
             print_readings(robot)
+        if args.imu:
+            print_imu(robot)
 
         vision = Vision()
-        print("Place the robot inside the ring. Learning the ring floor...")
-        samples = []
-        for _ in range(10):
-            samples.append(robot.floor_reading()[1])
+        print("Place the robot inside the ring and hold it still...")
+        while not getattr(robot, "imu_ready", True):   # IMU learning its resting value
             time.sleep(0.05)
-        ring_reflection = sum(samples) / len(samples)
-        print(f"Ring floor reflection = {ring_reflection:.0f}. GO!")
+        print("GO!")
 
         bb = Blackboard()
         last_active = None
         while True:
-            sense(bb, robot, vision, ring_reflection)
+            sense(bb, robot, vision)
             TREE.tick(bb)
             robot.drive(*bb.drive)
             if bb.active != last_active:    # print only when the decision changes
