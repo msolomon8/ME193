@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sumo Vision</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>Sumo Vision <span id="status">Not connected</span></h1>
+
+  <div id="question" class="hidden">
+    <p id="question-text"></p>
+    <button id="approve-btn" class="approve">Approve <kbd>Enter</kbd></button>
+    <button id="reject-btn" class="reject">Reject <kbd>Delete</kbd></button>
+  </div>
+  <div id="state"></div>
+
+  <img id="view" alt="camera">
+  <p id="readout"></p>
+
+  <div id="tools">
+    <button id="stop-btn">Stop charge</button>
+    <button id="out-btn" class="reject">We're out (sad song)</button>
+    <button id="floor-btn">Relearn floor</button>
+  </div>
+
+  <p class="legend">
+    <b class="red">red</b> = not floor (could be the opponent) &middot;
+    <b class="blue">blue</b> = tape &middot;
+    <b class="green">green outline</b> = the opponent (yellow = too small) &middot;
+    white line = horizon &middot; orange line = tape strip &middot;
+    top-left square = learned floor color
+  </p>
+
+  <script src="libs/socket.io.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

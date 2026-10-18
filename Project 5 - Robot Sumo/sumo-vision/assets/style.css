@@ -1,0 +1,54 @@
+body {
+  font-family: -apple-system, system-ui, sans-serif;
+  background: #111;
+  color: #eee;
+  margin: 16px;
+}
+
+h1 { font-size: 1.4em; }
+#status { font-size: 0.6em; color: #aaa; margin-left: 8px; }
+
+#view {
+  display: block;
+  width: 100%;
+  max-width: 640px;
+  image-rendering: pixelated;
+  border: 1px solid #444;
+  background: #000;
+  aspect-ratio: 4 / 3;
+}
+
+#question {
+  max-width: 640px;
+  padding: 12px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+}
+#question.opponent { background: #1d5c2a; }
+#question.out { background: #7a1d1d; }
+#question.hidden { display: none; }
+#question-text { font-size: 1.3em; font-weight: bold; margin: 0 0 10px; }
+
+#state { font-size: 1.1em; margin: 6px 0; min-height: 1.4em; }
+#state.charging { color: #4f4; font-weight: bold; }
+#state.out { color: #f66; font-weight: bold; }
+
+button {
+  font-size: 1em;
+  padding: 10px 16px;
+  margin: 4px 4px 4px 0;
+  border: none;
+  border-radius: 6px;
+  background: #444;
+  color: #fff;
+  cursor: pointer;
+}
+button.approve { background: #2a9d3f; }
+button.reject { background: #c0392b; }
+kbd { font-size: 0.75em; opacity: 0.8; margin-left: 4px; }
+
+#readout { font-family: monospace; color: #ccc; }
+.legend { font-size: 0.85em; color: #aaa; max-width: 640px; }
+.red { color: #f55; }
+.blue { color: #59f; }
+.green { color: #4f4; }

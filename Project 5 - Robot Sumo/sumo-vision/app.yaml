@@ -1,5 +1,6 @@
 name: Sumo Vision
-description: Robot Sumo sensor. Reads the Logitech webcam, finds the blue tape ring and the opponent, and publishes both on ME193/Rogers/MK for the laptop's behavior tree.
+description: Robot Sumo sensor. Reads the Logitech webcam, finds the opponent and the blue tape, and asks on its web page (port 7000) before telling the laptop to charge or that we're out, over MQTT on ME193/Rogers/MK.
 icon: 🤼
 ports: []
-bricks: []
+bricks:
+  - arduino:web_ui
