@@ -71,7 +71,7 @@ sys.path.insert(0, str(ME193 / "MQTT"))    # mqttlib.py
 MOTOR_CARD = None        # None = first Double Motor found
 COLOR_CARD = None
 CONTROLLER_CARD = None
-USE_CONTROLLER = True    # False = run without the controller (fully autonomous)
+USE_CONTROLLER = False   # False = run without the controller (fully autonomous)
 LEVER_DEADBAND = 0.05    # levers within this of center count as "let go"
 MOTOR_BACKWARD = True    # the Double Motor faces the back of the robot (flips forward AND left/right)
 
