@@ -5,6 +5,7 @@ Run (from the ME193 folder):
     le-venv/bin/python "Project 5 - Robot Sumo/sumo_brain.py" --readings   # print color sensor readings (for tuning)
     le-venv/bin/python "Project 5 - Robot Sumo/sumo_brain.py" --imu        # print accelerometer readings (for tuning)
     le-venv/bin/python "Project 5 - Robot Sumo/sumo_brain.py" --no-lego    # test the tree without the LEGO parts
+    (Windows: use "python" instead of "le-venv/bin/python". Add --speed 0.5 for a gentler run.)
 
 Three layers of communication:
   1. Autonomous sensors:
@@ -42,14 +43,28 @@ The policy is a behavior tree, checked top to bottom 20 times a second:
     |- back crossed tape + camera sees tape?   -> OUT: stop on its own, ask the app for the song
     |- a controller lever moved?               -> the driver drives (absolute override)
     |- tipped over (IMU)?                      -> stop until it's back on its wheels
+    |- back on tape, rolling FORWARD at a line   -> we drove over it: back off (reverse). Needs the wheels rolling forward
+    |  the camera had seen ahead?                  AND tape seen ahead recently (OVERSHOOT_BACKOFF)
     |- back on tape?                           -> full power forward off the edge, then turn
     |- in the middle of a maneuver?            -> keep doing it
     |- pushed from the front (IMU)?            -> full power forward, counteracting it
     |- the app said charge?                    -> charge straight ahead
     `- otherwise                               -> sit still
+
+Edge reflexes (the back sensor touches the tape):
+  - Normally we are being pushed out backward: full power forward, then turn back into the ring.
+  - If the wheels had been rolling the robot FORWARD toward a line the camera had seen, we drove over it (for example
+    charging a box out of the ring). Forward would take us further out, so we back off instead. The decision is made once,
+    when the back first touches the tape, and a second contact within BACK_OFF_RECOVER seconds (the reverse can cross the
+    line again) keeps the back-off going.
+  - Either way the charge you approved is cancelled (the escape moves and turns the robot, so it is stale) and you
+    approve a new one (EDGE_CANCELS_CHARGE).
+The settings that depend on how this robot is built (IMU_FORWARD_SIGN, WHEEL_FORWARD_SIGNS) were measured with imu_check.py
+and wheel_check.py: re-run them if the Double Motor is ever mounted differently.
 """
 
 import argparse
+import collections
 import json
 import math
 import os
@@ -89,9 +104,9 @@ OUT_CONFIRM = 0.3        # ...for this long (s) in a row = we're out
 OUT_IGNORE = 3.0         # after you reject "out", don't stop for it again for this long (s)
 VISION_TIMEOUT = 0.5     # camera numbers older than this (s) are ignored
 
-# ---- IMU (TODO: tune with --imu) ----
+# ---- IMU (measured on this robot with imu_check.py; re-run it if the Double Motor is ever mounted differently) ----
 IMU_AXIS = "accelerometerX"   # the Double Motor accelerometer axis along the driving direction
-IMU_FORWARD_SIGN = 1     # +1 if shoving the robot FORWARD by hand makes that axis go up, else -1
+IMU_FORWARD_SIGN = -1    # +1 if shoving the robot FORWARD by hand makes that axis go up, else -1 (it goes DOWN here: the motor faces backward)
 IMU_INTERVAL_MS = 20     # how often the Double Motor sends IMU readings
 IMU_SMOOTH = 0.5         # 0 = raw, closer to 1 = smoother (but slower to react)
 PUSH_ACCEL = 300         # a backward jolt bigger than this = pushed from the front
@@ -108,6 +123,38 @@ PUSH_SPEED = 100
 RESEND_EVERY = 0.5       # resend the same speed this often (s) in case a Bluetooth command was lost
 # Back on tape: full power forward, then turn right. (left, right, seconds) steps.
 BACK_EDGE_MOVE = [(100, 100, 0.6), (50, -50, 0.4)]
+# Back on tape while the robot was rolling FORWARD toward a line the camera had seen (it drove over the line, e.g. charging): "forward"
+# would take it further out, so it backs off instead.
+# ON: it passed both real-robot tests (charge a box over a taped line -> BACK OFF; pull the CHARGING robot backward over a line behind it ->
+# forward escape). A first version that used only the wheel counters FAILED the second one: the wheel counters show how the wheels turn, not
+# how the robot moves over the floor, and with the tyres slipping those differ. So it also needs the camera to have seen the line AHEAD
+# (OVERSHOOT_NEEDS_LINE). Re-run both tests if you change speed a lot, and set this to False to get the original behavior back.
+# The real fix for driving yourself out is a colour sensor at the FRONT.
+OVERSHOOT_BACKOFF = True    # False = always use BACK_EDGE_MOVE (the original behavior)
+OVERSHOOT_WINDOW = 1.0      # s: how far back to look at the wheels when the back first reaches the tape
+OVERSHOOT_NOW = 0.25        # s: ... and the robot must not be rolling backward in this last bit
+OVERSHOOT_TRAVEL = 90       # wheel degrees of net forward rolling in the window (about a quarter turn of the wheels)
+# The two wheel counters can count in OPPOSITE directions when the robot drives straight (the motors are mirrored), so each wheel has its own
+# sign: +1 if driving the robot FORWARD makes that wheel's position go UP, else -1. If both were wrong the readings would cancel and the
+# robot would simply keep the old forward escape. wheel_check.py works the signs out and prints this line for you.
+WHEEL_FORWARD_SIGNS = (1, -1)    # measured on this robot with wheel_check.py: driving forward makes wheel 0 count UP and wheel 1 count DOWN
+BACK_OFF_MOVE = [(-100, -100, 0.4)]
+# After ANY back-edge event the charge you approved is stale: the escape moved and turned the robot, so "charge straight ahead" now points
+# somewhere else, perhaps back at the line (this happened on the real robot). So the charge is cancelled, like pressing Delete, and you approve
+# a new one when you are ready. A "charge" message already on its way is ignored for EDGE_NO_CHARGE seconds.
+EDGE_CANCELS_CHARGE = True  # False = the old behavior: the approved charge resumes after the escape
+# The command takes a moment to reach the wheels, so the robot rolls on forward after a back-off is chosen and its back sensor can slide PAST
+# the tape onto the floor outside. The reverse then carries the sensor back over the tape from the OUTSIDE, which looks like "pushed out" and
+# would run the forward escape, driving the robot out again (seen on the real robot: the robot kept driving forward after backing off). So for
+# this long after a back-off, a tape contact keeps the back-off going. (The cost: an opponent pushing us over a line within this time is
+# also answered with a reverse, so keep it short.)
+BACK_OFF_RECOVER = 1.0      # s
+EDGE_NO_CHARGE = 2.0        # s
+# The wheel counters follow the WHEELS, not the floor: a robot dragged backward over the line while its wheels spin forward still reads "rolling
+# forward". What tells the two cases apart is the camera: a line we drove OVER was seen AHEAD just before; a line we are pushed back over was behind us.
+OVERSHOOT_NEEDS_LINE = True # False = skip this camera check (then a robot pushed back while charging is wrongly told to back off)
+TAPE_SEEN = 0.04            # the camera's tape_ahead above this counts as "I can see the line ahead"
+LINE_AHEAD_WINDOW = 3.0     # s: the line must have been seen ahead within this long before the back reached the tape
 
 SUCCESS, FAILURE, RUNNING = "SUCCESS", "FAILURE", "RUNNING"
 
@@ -175,6 +222,10 @@ class Blackboard:
         self.lever_right = 0.0
         self.charge_until = 0.0      # the app said charge: charging until this time
         self.back_saw_tape_at = None # last time the back sensor saw blue
+        self.edge_overshoot = False  # the back just reached the tape while the wheels were rolling forward toward a line we had seen
+        self.backoff_until = 0.0     # until this time a tape contact keeps the back-off going (the reverse can cross the line again)
+        self.tape_ahead_seen_at = None  # last time the camera saw tape ahead
+        self.charge_block_until = 0.0   # after a back-off: ignore "charge" until this time
         self.tape_ahead = 0.0        # camera: how much tape is right in front
         self.out_since = None        # back crossed the tape + camera sees it, since when
         self.out_detected = False    # fusion says we're out: stopped, waiting for the app
@@ -273,6 +324,14 @@ def leave_back_edge(bb):
     off the tape, then turn back into the ring."""
     start_maneuver(bb, BACK_EDGE_MOVE)
 
+def back_overshoot(bb):
+    return bb.floor == "tape" and bb.edge_overshoot
+
+def back_off(bb):
+    """The back reached the tape while we were rolling forward: we drove over the line, so going forward
+    would take us further out. Reverse back into the ring."""
+    start_maneuver(bb, BACK_OFF_MOVE)
+
 def push_back(bb):
     """The IMU felt a push from the front: full power forward, counteracting it."""
     bb.maneuver = []
@@ -292,6 +351,7 @@ TREE = Selector(
     Sequence(Condition("out detected", out_detected), Action("OUT? stopped, ask app", stop_out)),
     Sequence(Condition("lever moved", driver_override), Action("DRIVER OVERRIDE", driver_drives)),
     Sequence(Condition("tipped over", tipped_over), Action("TIPPED OVER - stop", stop_tipped)),
+    Sequence(Condition("back on tape, rolling forward", back_overshoot), Action("back edge: BACK OFF", back_off)),
     Sequence(Condition("back on tape", back_on_tape), Action("back edge: forward", leave_back_edge)),
     Sequence(Condition("maneuvering", maneuvering), Action("edge maneuver", continue_maneuver)),
     Sequence(Condition("pushed from front", pushed_front), Action("IMU PUSH! pushing back", push_back)),
@@ -313,6 +373,9 @@ class Keyboard:
         if not sys.stdin.isatty():
             print("(no terminal keyboard: keys won't work)")
             return
+        if sys.platform == "win32":               # Windows has no termios: read keys with msvcrt instead
+            threading.Thread(target=self._read_windows, daemon=True).start()
+            return
         import termios
         import tty
         self._fd = sys.stdin.fileno()
@@ -331,6 +394,26 @@ class Keyboard:
                 self.keys.put("space")
             elif b"o" in data or b"O" in data:
                 self.keys.put("o")
+
+    def _read_windows(self):
+        import msvcrt
+        while True:
+            ch = msvcrt.getwch()                  # waits for one key, no Enter needed
+            if ch in ("\x00", "\xe0"):            # a special key arrives as two characters
+                if msvcrt.getwch() == "S":        # ... and 'S' second means the Delete key
+                    self.keys.put("delete")
+            elif ch in ("\r", "\n"):
+                self.keys.put("enter")
+            elif ch in ("\x08", "\x7f"):          # Backspace works as Delete too
+                self.keys.put("delete")
+            elif ch == " ":
+                self.keys.put("space")
+            elif ch in ("o", "O"):
+                self.keys.put("o")
+            elif ch == "\x03":                    # Ctrl+C: getwch() swallows it, so pass it on to the main thread
+                import _thread
+                _thread.interrupt_main()
+                return
 
     def pressed(self):
         out = []
@@ -359,7 +442,9 @@ class AppLink:
         self.ask = None                       # the app's open question: "opponent", "out" or None
         self.answered_at = 0.0                # when you last answered (the app needs a moment)
         self._tape_ahead, self._tape_at = 0.0, 0.0
-        self.client = MQTTClient().connect()
+        client = MQTTClient()
+        client.connect()                      # some versions of mqttlib return the client from connect() and some return None: don't depend on it
+        self.client = client
         self.client.subscribe(MQTT_TOPIC, self._on_message)
         print(f"MQTT: waiting for the app's charge messages on {MQTT_TOPIC}")
 
@@ -464,6 +549,7 @@ class LegoRobot:
         self.tilt = 0.0              # degrees away from how the robot sat at startup
         self.pushed_at = None
         self.quiet_until = 0.0
+        self._wheel_hist = collections.deque(maxlen=300)   # (time, left wheel position, right wheel position), about 6 s
         self._running = True
         threading.Thread(target=self._watch_imu, daemon=True).start()
 
@@ -500,7 +586,33 @@ class LegoRobot:
             if not any(map(math.isnan, g)):
                 g_now = [TIP_SMOOTH * s + (1 - TIP_SMOOTH) * v for s, v in zip(g_now, g)]
                 self.tilt = angle_between(up, g_now)
+            self._sample_wheels()
             time.sleep(dt)
+
+    def _sample_wheels(self):
+        try:
+            left, right = float(self.motor.motor[0].position), float(self.motor.motor[1].position)   # fetched fresh: the library swaps the objects
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return
+        if not (math.isnan(left) or math.isnan(right)):
+            self._wheel_hist.append((time.monotonic(), left, right))
+
+    def wheel_travel(self, seconds):
+        """How far each wheel's raw position counter changed in the last `seconds`: (wheel 0, wheel 1) in degrees.
+        None if there are no wheel readings yet."""
+        now = time.monotonic()
+        recent = [h for h in list(self._wheel_hist) if now - h[0] <= seconds]
+        if len(recent) < 2:
+            return None
+        return recent[-1][1] - recent[0][1], recent[-1][2] - recent[0][2]
+
+    def forward_travel(self, seconds):
+        """How far the wheels rolled the robot FORWARD (degrees, averaged over both wheels) in the last `seconds`.
+        None if there are no wheel readings yet."""
+        moved = self.wheel_travel(seconds)
+        if moved is None:
+            return None
+        return (moved[0] * WHEEL_FORWARD_SIGNS[0] + moved[1] * WHEEL_FORWARD_SIGNS[1]) / 2.0
 
     def tipped_over(self):
         return self.tilt > TIP_ANGLE
@@ -537,18 +649,57 @@ class NoLego:
     def levers(self):         return 0.0, 0.0
     def pushed_from_front(self): return False
     def tipped_over(self):    return False
+    def forward_travel(self, seconds): return None
+    def wheel_travel(self, seconds):   return None
     def drive(self, left, right): pass
     def stop(self):           pass
+
+
+def rolling_forward(robot):
+    """True if the wheels rolled the robot forward over the last OVERSHOOT_WINDOW seconds and are not rolling it backward now."""
+    if not OVERSHOOT_BACKOFF:
+        return False
+    recent, latest = robot.forward_travel(OVERSHOOT_WINDOW), robot.forward_travel(OVERSHOOT_NOW)
+    return recent is not None and recent >= OVERSHOOT_TRAVEL and (latest is None or latest >= 0)
+
+
+def line_was_ahead(bb, now):
+    """True if the camera saw tape ahead recently: the line we may have just driven over (not one behind us that we are pushed over)."""
+    if not OVERSHOOT_NEEDS_LINE:
+        return True
+    return bb.tape_ahead_seen_at is not None and now - bb.tape_ahead_seen_at <= LINE_AHEAD_WINDOW
 
 
 def sense(bb, robot, app):
     """Read every sensor (and the app's commands) into the blackboard."""
     now = time.monotonic()
+    bb.tape_ahead = app.tape_ahead()
+    if bb.tape_ahead > TAPE_SEEN:
+        bb.tape_ahead_seen_at = now
+    was_tape = bb.floor == "tape"
     color, _ = robot.floor_reading()
     bb.floor = "tape" if color == TAPE_COLOR else "floor"
     if bb.floor == "tape":
         bb.back_saw_tape_at = now
-    bb.tape_ahead = app.tape_ahead()
+        if not was_tape:                       # the back JUST reached the tape: which way are the wheels rolling the robot?
+            recovering = now < bb.backoff_until                    # we are in the middle of backing off
+            bb.edge_overshoot = recovering or (rolling_forward(robot) and line_was_ahead(bb, now))
+            charging = app.charge_until > now
+            if bb.edge_overshoot:
+                bb.backoff_until = now + BACK_OFF_RECOVER
+                bb.out_ignore_until = max(bb.out_ignore_until, now + OUT_WINDOW)     # we are recovering: don't ask "out?" about it
+                if recovering:
+                    print("\nBack sensor on the tape again while backing off (the reverse crossed the line): keep backing off.")
+                else:
+                    print("\nBack reached the tape while rolling FORWARD toward a line we had seen ahead (we drove over it): backing off, charge cancelled.")
+            elif EDGE_CANCELS_CHARGE and charging:
+                print("\nBack reached the tape: charge cancelled (the escape moves and turns the robot). Approve a new one when you are ready.")
+            if bb.edge_overshoot or EDGE_CANCELS_CHARGE:
+                app.charge_until = 0.0                                              # cancel the charge, like pressing Delete,
+                app.send({"answer": "stop_charge"})                                 # or the app would keep sending it and it would resume
+                bb.charge_block_until = now + EDGE_NO_CHARGE                        # and ignore any "charge" already on its way
+    if now < bb.charge_block_until:                                                 # just backed off: a late "charge" message is ignored
+        app.charge_until = 0.0
     bb.charge_until = app.charge_until
     bb.out = app.out
 
@@ -578,6 +729,22 @@ def sense(bb, robot, app):
 # Sad song (the LEGO parts can only beep, so it plays on the laptop)
 # ---------------------------------------------------------------------------
 
+def play_wav(path):
+    """Play a .wav without waiting for it: winsound on Windows, afplay on macOS, paplay/aplay on Linux."""
+    path = str(path)
+    if sys.platform == "win32":
+        import winsound
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        return
+    for player in ([["afplay"]] if sys.platform == "darwin" else [["paplay"], ["aplay", "-q"]]):
+        try:
+            subprocess.Popen(player + [path])
+            return
+        except FileNotFoundError:
+            continue
+    print("(no audio player found on this computer - imagine a sad trombone)")
+
+
 def play_sad_song():
     """Sad trombone: wah wah wah waaaah."""
     rate = 22050
@@ -596,10 +763,7 @@ def play_sad_song():
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(bytes(frames))
-    try:
-        subprocess.Popen(["afplay", str(path)])
-    except FileNotFoundError:
-        print("(no afplay on this computer - imagine a sad trombone)")
+    play_wav(path)
 
 
 # ---------------------------------------------------------------------------
@@ -618,14 +782,21 @@ def print_imu(robot):
     print("Keep the robot still while it learns its resting value...")
     while not robot.imu_ready:
         time.sleep(0.05)
-    print("Accelerometer readings (Ctrl+C to stop). Shove the robot FORWARD by hand:")
-    print("  the axis that jumps most is IMU_AXIS; if it goes DOWN, set IMU_FORWARD_SIGN = -1.")
-    print("  Then shove it BACKWARD: 'forward' should go negative past PUSH_ACCEL and print PUSH!")
-    imu = robot.motor.imu_device
+    print("Accelerometer readings (Ctrl+C to stop). The line below updates IN PLACE, so watch it while you move the robot.")
+    print("  1. Shove the robot FORWARD (toward the camera) and let it stop. The FIRST jump, as you start pushing, is the one to read:")
+    print("     the axis that jumps most is IMU_AXIS; if 'forward' goes DOWN at the start, set IMU_FORWARD_SIGN = -1.")
+    print("     (The opposite jump when you stop it is normal.)")
+    print(f"  2. Shove it BACKWARD, like an opponent hitting its front: 'forward' should go below -{PUSH_ACCEL} (PUSH_ACCEL) and print PUSH!")
+    print("  'last 3 s' is the biggest swing down and up in the last 3 seconds, so you can read it after a quick shove.")
+    recent = []                                   # (time, forward) for the last 3 seconds
     while True:
+        imu = robot.motor.imu_device              # fetched EVERY time: the LEGO library swaps in a brand-new object for each reading
+        now = time.monotonic()
+        recent = [(t, a) for t, a in recent if now - t < 3.0] + [(now, robot.accel)]
+        low, high = min(a for _, a in recent), max(a for _, a in recent)
         flag = "PUSH!" if robot.pushed_from_front() else "     "
         print(f"\rX={imu.accelerometerX:7.0f} Y={imu.accelerometerY:7.0f} Z={imu.accelerometerZ:7.0f}"
-              f"   forward={robot.accel:+7.0f}  tilt={robot.tilt:3.0f}deg  {flag}", end="", flush=True)
+              f"   forward={robot.accel:+7.0f}  last 3 s: {low:+6.0f} .. {high:+6.0f}  tilt={robot.tilt:3.0f}deg  {flag}", end="", flush=True)
         time.sleep(0.05)
 
 

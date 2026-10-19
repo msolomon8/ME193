@@ -37,7 +37,7 @@ socket.on('view', (v) => {
 
   readout.textContent =
     `opponent: ${v.opp_seen ? 'seen' : 'no'}  size=${v.opp_size.toFixed(2)}   ` +
-    `tape ahead=${v.tape_ahead.toFixed(2)}`;
+    `tape ahead=${v.tape_ahead.toFixed(2)}` + (v.note ? `   ${v.note}` : '');
 });
 
 function answer(action) {
@@ -57,6 +57,12 @@ document.querySelector('#reject-btn').addEventListener('click', reject);
 document.querySelector('#stop-btn').addEventListener('click', () => answer('stop_charge'));
 document.querySelector('#out-btn').addEventListener('click', () => answer('out_now'));
 document.querySelector('#floor-btn').addEventListener('click', () => answer('relearn_floor'));
+
+// Click on the blue tape in the picture: the board learns the tape's real colour from the spot you clicked.
+viewEl.addEventListener('click', (e) => {
+  const box = viewEl.getBoundingClientRect();
+  socket.emit('answer', { action: 'learn_tape', x: (e.clientX - box.left) / box.width, y: (e.clientY - box.top) / box.height });
+});
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); approve(); }

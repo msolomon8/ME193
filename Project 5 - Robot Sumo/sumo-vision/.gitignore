@@ -1,2 +1,4 @@
 # ignore app cache folder
 .cache/
+# the tape colour learned by clicking: belongs to one board and one set of lights
+tape_calibration.json
