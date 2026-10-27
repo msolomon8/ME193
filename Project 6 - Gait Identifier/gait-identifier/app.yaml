@@ -1,0 +1,5 @@
+name: Gait Identifier
+description: Wearable gait identifier. Reads an MPU-6050 IMU, tells standing, walking, running and biking apart with two decision trees (peak acceleration on one axis vs. all IMU outputs), shows model 2's answer on the LED matrix as an animated stick figure and streams everything over MQTT on ME193/Rogers/MiaGait.
+ports: []
+bricks: []
+icon: 🏃

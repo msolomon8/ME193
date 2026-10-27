@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gait Identifier</title>
+<!-- Live view for the Gait Identifier wearable. Open this file in a browser.
+     It listens to ME193/Rogers/MiaGait/{raw,pred} on broker.hivemq.com over websockets.
+     Add ?demo to the URL (or press Demo) to see it without the wearable. -->
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f7f6f2; --surface: #ffffff; --ink: #1f1f1e; --muted: #6b6a64; --line: #e4e3dd;
+    --figure: #1f1f1e; --bike: #9c9a92;
+    --standing: #2a78d6; --walking: #eb6834; --running: #1baf7a; --biking: #eda100; --none: #b5b3ab;
+    --good: #1baf7a; --warn: #eb6834;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #121211; --surface: #1a1a19; --ink: #f0efec; --muted: #a8a69c; --line: #33332f;
+      --figure: #f0efec; --bike: #77756d;
+      --standing: #3987e5; --walking: #d95926; --running: #199e70; --biking: #c98500; --none: #5b5a54;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #121211; --surface: #1a1a19; --ink: #f0efec; --muted: #a8a69c; --line: #33332f;
+    --figure: #f0efec; --bike: #77756d;
+    --standing: #3987e5; --walking: #d95926; --running: #199e70; --biking: #c98500; --none: #5b5a54;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 32px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  .status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--none); }
+  .dot.on { background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 25%, transparent); }
+  .dot.demo { background: var(--warn); }
+  .controls { margin-left: auto; display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--muted); }
+  .controls label { white-space: nowrap; }
+  .controls input { width: 58px; font: inherit; color: var(--ink); background: var(--surface);
+                    border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+  button { font: inherit; font-size: 13px; color: var(--ink); background: var(--surface);
+           border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  button[aria-pressed="true"] { border-color: var(--warn); }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .scenes { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 14px; }
+  .scenes > .card { display: flex; flex-direction: column; min-width: 0; }
+  .scenes svg.scene { margin-top: auto; padding-top: 6px; }
+  .scene-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 8px; }
+  .model-name { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .detail { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .activity { display: flex; align-items: center; gap: 10px; font-size: 30px; font-weight: 700; margin-top: 2px; }
+  .side .activity { font-size: 22px; }
+  .swatch { width: 14px; height: 14px; border-radius: 4px; background: var(--none); flex: none; }
+  svg.scene { width: 100%; height: auto; display: block; margin-top: 6px; }
+  .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+  .stat { min-width: 0; }
+  .stat .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .stat .value { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; margin-top: 4px; }
+  .stat .unit { font-size: 15px; font-weight: 500; color: var(--muted); margin-left: 4px; }
+  .stat .sub { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .signals { margin-top: 14px; display: grid; gap: 8px; }
+  .strip-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  canvas { width: 100%; height: 64px; display: block; }
+  footer { margin-top: 14px; font-size: 12px; color: var(--muted); }
+  @media (max-width: 760px) {
+    .scenes { grid-template-columns: minmax(0, 1fr); }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .stat .value { font-size: 28px; }
+    .controls { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Gait Identifier</h1>
+    <span class="status"><span class="dot" id="dot"></span><span id="status">Connecting…</span></span>
+    <div class="controls">
+      <label>Height <input id="height" type="number" min="48" max="84" step="1" value="66"> in</label>
+      <button id="reset">Reset distance</button>
+      <button id="demo" aria-pressed="false">Demo</button>
+    </div>
+  </header>
+
+  <div class="scenes">
+    <section class="card" id="panel2">
+      <div class="scene-head">
+        <span class="model-name">Model 2 · all IMU outputs</span>
+        <span class="detail" id="detail2"></span>
+      </div>
+      <div class="activity"><span class="swatch" id="sw2"></span><span id="act2">—</span></div>
+      <svg class="scene" id="scene2" viewBox="-170 -215 340 235" role="img" aria-label="Model 2 animation"></svg>
+    </section>
+    <section class="card side" id="panel1">
+      <div class="scene-head">
+        <span class="model-name">Model 1 · one peak</span>
+        <span class="detail" id="detail1"></span>
+      </div>
+      <div class="activity"><span class="swatch" id="sw1"></span><span id="act1">—</span></div>
+      <svg class="scene" id="scene1" viewBox="-170 -215 340 235" role="img" aria-label="Model 1 animation"></svg>
+    </section>
+  </div>
+
+  <div class="stats">
+    <div class="card stat"><div class="label">Speed</div>
+      <div class="value"><span id="speed">0.0</span><span class="unit">mph</span></div>
+      <div class="sub" id="speedKm">0.0 km/h</div></div>
+    <div class="card stat"><div class="label" id="cadLabel">Cadence</div>
+      <div class="value"><span id="cadence">0</span><span class="unit" id="cadUnit">steps/min</span></div>
+      <div class="sub" id="cadSub">stride rate from the gyro</div></div>
+    <div class="card stat"><div class="label">Distance</div>
+      <div class="value"><span id="dist">0</span><span class="unit">m</span></div>
+      <div class="sub" id="distMi">0.00 mi</div></div>
+    <div class="card stat"><div class="label">Models</div>
+      <div class="value" id="agree" style="font-size:24px">—</div>
+      <div class="sub" id="agreeSub">&nbsp;</div></div>
+  </div>
+
+  <div class="card signals">
+    <div class="strip-label"><span>Acceleration magnitude, last 10 s</span><span id="aNow">— g</span></div>
+    <canvas id="accel"></canvas>
+    <div class="strip-label"><span>Rotation magnitude, last 10 s</span><span id="gNow">— deg/s</span></div>
+    <canvas id="gyro"></canvas>
+  </div>
+
+  <footer>
+    Both models run on the UNO Q, and this page only displays them. The figure moves at your measured stride or pedal rate.
+    Speed is an estimate: stride rate × stride length scaled from your height (biking assumes 5.5 m per pedal turn).
+  </footer>
+</div>
+
+<script>
+const TOPIC = "ME193/Rogers/MiaGait";
+const RATE = 50, SECONDS = 10;
+const CLASSES = ["standing", "walking", "running", "biking"];
+const DEFAULT_HZ = { standing: 0.25, walking: 0.9, running: 1.45, biking: 1.2 };
+const DEG = Math.PI / 180;
+const PX_PER_M = 110;                 // the drawn leg (100 px) is about 0.9 m
+
+// ---------------- state ----------------
+const state = {
+  pred: null, lastMsg: 0, demo: false,
+  amag: new Array(SECONDS * RATE).fill(1), gmag: new Array(SECONDS * RATE).fill(0),
+  hz: 0, speed: 0, dist: 0,
+};
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+function heightM() {
+  const v = parseFloat(document.getElementById("height").value);
+  return (isFinite(v) && v > 30 ? v : 66) * 0.0254;
+}
+try { const h = localStorage.getItem("gait-height"); if (h) document.getElementById("height").value = h; } catch (e) {}
+document.getElementById("height").addEventListener("change", e => {
+  try { localStorage.setItem("gait-height", e.target.value); } catch (err) {}
+});
+document.getElementById("reset").onclick = () => { state.dist = 0; };
+
+// Stride rate the figure moves at: the measured one if the signal is clearly periodic.
+function strideHz(cls) {
+  const p = state.pred;
+  if (cls === "standing" || !cls) return DEFAULT_HZ.standing;
+  if (p && p.cadence > 0.3 && (p.periodicity ?? 1) > 0.3) return p.cadence;
+  return DEFAULT_HZ[cls];
+}
+
+// Speed (m/s) from stride rate f (Hz, one ankle = one cycle per stride) and height H.
+function speedFor(cls, f, H) {
+  if (cls === "walking") return f * H * (0.45 + 0.42 * f);   // stride ~0.83 H at 0.9 Hz
+  if (cls === "running") return f * H * (0.2 + 0.9 * f);     // stride ~1.5 H at 1.4 Hz
+  if (cls === "biking") return f * 5.5;                       // 5.5 m per pedal turn
+  return 0;
+}
+
+// ---------------- MQTT ----------------
+function onMessage(topic, d) {
+  state.lastMsg = performance.now();
+  if (topic.endsWith("/raw")) {
+    for (const [ax, ay, az, gx, gy, gz] of d.s) {
+      state.amag.push(Math.hypot(ax, ay, az)); state.amag.shift();
+      state.gmag.push(Math.hypot(gx, gy, gz)); state.gmag.shift();
+    }
+  } else if (topic.endsWith("/pred")) {
+    state.pred = d;
+  }
+}
+let client = null;
+try {
+  client = mqtt.connect("wss://broker.hivemq.com:8884/mqtt", { clientId: "gait-ui-" + Math.random().toString(16).slice(2, 8) });
+  client.on("connect", () => client.subscribe([TOPIC + "/raw", TOPIC + "/pred"]));
+  client.on("message", (topic, buf) => { if (!state.demo) { try { onMessage(topic, JSON.parse(buf.toString())); } catch (e) {} } });
+} catch (e) { console.warn("MQTT unavailable", e); }
+
+// ---------------- demo mode ----------------
+const demoPlan = [  // [model 2, model 1, stride Hz] — model 1 gets biking wrong, like a peak-only model would
+  ["standing", "standing", 0], ["walking", "walking", 0.9], ["running", "running", 1.45],
+  ["biking", "standing", 1.2], ["walking", "walking", 1.05], ["biking", "walking", 1.35],
+];
+let demoT = 0;
+function demoTick(dt) {
+  demoT += dt;
+  const [m2, m1, f] = demoPlan[Math.floor(demoT / 6) % demoPlan.length];
+  const t = demoT;
+  const amp = { standing: 0.02, walking: 1.2, running: 4, biking: 0.3 }[m2];
+  const gamp = { standing: 3, walking: 180, running: 450, biking: 140 }[m2];
+  const n = Math.round(dt * RATE) || 1;
+  for (let i = 0; i < n; i++) {
+    const ti = t + i / RATE, ph = (ti * f) % 1;
+    const a = m2 === "biking" ? 1 + amp * Math.sin(2 * Math.PI * f * ti)
+            : 1 + amp * Math.exp(-(((ph - 0.1) / 0.04) ** 2)) + 0.03 * Math.random();
+    state.amag.push(a); state.amag.shift();
+    state.gmag.push(Math.abs(gamp * Math.sin(2 * Math.PI * f * ti)) + 2 * Math.random()); state.gmag.shift();
+  }
+  state.pred = { m1, m2, cadence: f, periodicity: 0.9, peak: m2 === "running" ? 5.8 : m2 === "walking" ? 2.4 : 1.05,
+                 peak_name: "max_az", gyro: gamp * 0.64 };
+  state.lastMsg = performance.now();
+}
+const demoBtn = document.getElementById("demo");
+function setDemo(on) {
+  state.demo = on; demoT = 0; demoBtn.setAttribute("aria-pressed", String(on));
+  demoBtn.textContent = on ? "Stop demo" : "Demo";
+}
+demoBtn.onclick = () => setDemo(!state.demo);
+if (new URLSearchParams(location.search).has("demo")) setDemo(true);
+
+// ---------------- stick figure ----------------
+const NS = "http://www.w3.org/2000/svg";
+function el(parent, tag, attrs) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  parent.appendChild(e); return e;
+}
+const add = (p, L, a) => [p[0] + L * Math.sin(a), p[1] + L * Math.cos(a)];   // angle from straight down, + = forward
+const pts = arr => arr.map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+
+function leg(hip, thigh, knee) {
+  const k = add(hip, 50, thigh), s = thigh - knee, a = add(k, 50, s);
+  return [hip, k, a, [a[0] + 13 * Math.cos(s), a[1] - 13 * Math.sin(s)]];
+}
+function arm(sh, upper, flex) {
+  const e = add(sh, 32, upper);
+  return [sh, e, add(e, 30, upper + flex)];
+}
+function ik(a, b, L1, L2, pick) {   // middle joint of a two-link chain from a to b; pick chooses between the two solutions
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const d = Math.min(Math.hypot(dx, dy), L1 + L2 - 0.01);
+  const x = (L1 * L1 - L2 * L2 + d * d) / (2 * d), h = Math.sqrt(Math.max(0, L1 * L1 - x * x));
+  const ux = dx / d, uy = dy / d;
+  const c1 = [a[0] + ux * x - uy * h, a[1] + uy * x + ux * h];
+  const c2 = [a[0] + ux * x + uy * h, a[1] + uy * x - ux * h];
+  return pick(c1, c2);
+}
+
+const BIKE = { rear: [-62, -30], front: [64, -30], bb: [0, -34], seat: [-18, -96], head: [44, -92], bar: [52, -101], r: 30, crank: 16 };
+
+function pose(cls, phi) {
+  const legs = [], arms = [];
+  let lean = 0, hip = [0, 0];
+  if (cls === "biking") {
+    hip = [-16, -101]; lean = 38 * DEG;
+    for (let i = 0; i < 2; i++) {
+      const c = phi + i * Math.PI;
+      const pedal = [BIKE.bb[0] + BIKE.crank * Math.cos(c), BIKE.bb[1] + BIKE.crank * Math.sin(c)];
+      const ankle = [pedal[0] - 3, pedal[1] - 5];
+      const knee = ik(hip, ankle, 50, 50, (p, q) => (p[0] > q[0] ? p : q));
+      legs.push([hip, knee, ankle, [ankle[0] + 13, ankle[1] + 3]]);
+    }
+    const sh = [hip[0] + 58 * Math.sin(lean), hip[1] - 58 * Math.cos(lean)];
+    for (let i = 0; i < 2; i++) {
+      const elbow = ik(sh, BIKE.bar, 32, 30, (p, q) => (p[1] > q[1] ? p : q));
+      arms.push([sh, elbow, BIKE.bar]);
+    }
+    return { legs, arms, sh, lean, bike: true };
+  }
+  for (let i = 0; i < 2; i++) {
+    const s = phi + i * Math.PI;
+    if (cls === "running") {
+      legs.push(leg([0, 0], (8 + 42 * Math.sin(s)) * DEG, (15 + 100 * Math.max(0, Math.cos(s)) ** 1.5) * DEG));
+      arms.push((sh) => arm(sh, (10 - 38 * Math.sin(s)) * DEG, 95 * DEG));
+    } else if (cls === "walking") {
+      legs.push(leg([0, 0], 22 * Math.sin(s) * DEG, (5 + 45 * Math.max(0, Math.cos(s)) ** 2) * DEG));
+      arms.push((sh) => arm(sh, -18 * Math.sin(s) * DEG, 20 * DEG));
+    } else {                                          // standing (or no model yet): breathe
+      legs.push(leg([0, 0], (i ? -3 : 3) * DEG, 2 * DEG));
+      arms.push((sh) => arm(sh, (i ? -4 : 6) * DEG, 10 * DEG));
+    }
+  }
+  lean = { running: 12, walking: 4 }[cls] * DEG || Math.sin(phi) * 0.8 * DEG;
+  // put the lowest foot on the ground; runners get a little flight on top of that
+  const low = Math.max(...legs.flatMap(l => [l[2][1], l[3][1]]));
+  const lift = cls === "running" ? 7 * Math.max(0, Math.sin(2 * phi)) : 0;
+  const dy = -low - lift;
+  for (const l of legs) for (const p of l) p[1] += dy;
+  hip = [0, dy];
+  const sh = [hip[0] + 60 * Math.sin(lean), hip[1] - 60 * Math.cos(lean)];
+  return { legs, arms: arms.map(f => f(sh)), sh, lean, bike: false };
+}
+
+class Scene {
+  constructor(svg) {
+    this.phi = 0; this.wheel = 0; this.ground = 0; this.cls = null;
+    const g = el(svg, "g", {});
+    this.dashes = el(g, "g", {});
+    for (let x = -200; x <= 240; x += 40) el(this.dashes, "line", { x1: x, y1: 8, x2: x + 18, y2: 8, "stroke-width": 3, "stroke-linecap": "round", class: "dash" });
+    this.groundLine = el(g, "line", { x1: -170, y1: 0, x2: 170, y2: 0, "stroke-width": 2 });
+    this.bike = el(g, "g", { fill: "none", "stroke-width": 4, "stroke-linecap": "round", "stroke-linejoin": "round" });
+    this.wheels = [BIKE.rear, BIKE.front].map(c => {
+      const w = el(this.bike, "g", { transform: `translate(${c[0]},${c[1]})` });
+      el(w, "circle", { r: BIKE.r, "stroke-width": 4 });
+      const spokes = el(w, "g", { "stroke-width": 1.5 });
+      for (let k = 0; k < 3; k++) el(spokes, "line", { x1: 0, y1: -BIKE.r, x2: 0, y2: BIKE.r, transform: `rotate(${k * 60})` });
+      return spokes;
+    });
+    el(this.bike, "polyline", { points: pts([BIKE.rear, BIKE.bb, BIKE.seat, BIKE.rear]) });
+    el(this.bike, "polyline", { points: pts([BIKE.seat, BIKE.head, BIKE.bb]) });
+    el(this.bike, "polyline", { points: pts([BIKE.front, BIKE.head, BIKE.bar, [BIKE.bar[0] + 10, BIKE.bar[1] + 2]]) });
+    el(this.bike, "line", { x1: BIKE.seat[0] - 12, y1: BIKE.seat[1] - 3, x2: BIKE.seat[0] + 8, y2: BIKE.seat[1] - 3, "stroke-width": 6 });
+    this.crank = el(this.bike, "line", { "stroke-width": 3 });
+    const body = { fill: "none", "stroke-width": 9, "stroke-linecap": "round", "stroke-linejoin": "round" };
+    this.back = el(g, "g", { ...body, opacity: 0.45 });
+    this.backLeg = el(this.back, "polyline", {}); this.backArm = el(this.back, "polyline", {});
+    this.front = el(g, "g", body);
+    this.torso = el(this.front, "line", {});
+    this.head = el(this.front, "circle", { r: 15, "stroke-width": 0 });
+    this.frontLeg = el(this.front, "polyline", {}); this.frontArm = el(this.front, "polyline", {});
+  }
+  draw(cls, hz, speed, dt, colors) {
+    this.phi += 2 * Math.PI * hz * dt;
+    const px = speed * PX_PER_M * dt;
+    this.ground = (this.ground + px) % 40;
+    this.dashes.setAttribute("transform", `translate(${-this.ground},0)`);
+    const p = pose(cls, this.phi);
+    this.bike.style.display = p.bike ? "" : "none";
+    if (p.bike) {
+      this.wheel += px / BIKE.r;
+      for (const w of this.wheels) w.setAttribute("transform", `rotate(${this.wheel / DEG})`);
+      const c = this.phi, b = BIKE.bb, r = BIKE.crank;
+      this.crank.setAttribute("x1", b[0] - r * Math.cos(c)); this.crank.setAttribute("y1", b[1] - r * Math.sin(c));
+      this.crank.setAttribute("x2", b[0] + r * Math.cos(c)); this.crank.setAttribute("y2", b[1] + r * Math.sin(c));
+    }
+    // leg 1 / arm 1 are the far side
+    this.backLeg.setAttribute("points", pts(p.legs[1])); this.backArm.setAttribute("points", pts(p.arms[1]));
+    this.frontLeg.setAttribute("points", pts(p.legs[0])); this.frontArm.setAttribute("points", pts(p.arms[0]));
+    const hip = p.legs[0][0];
+    this.torso.setAttribute("x1", hip[0]); this.torso.setAttribute("y1", hip[1]);
+    this.torso.setAttribute("x2", p.sh[0]); this.torso.setAttribute("y2", p.sh[1]);
+    this.head.setAttribute("cx", p.sh[0] + 24 * Math.sin(p.lean)); this.head.setAttribute("cy", p.sh[1] - 24 * Math.cos(p.lean));
+    this.front.setAttribute("stroke", colors.figure); this.back.setAttribute("stroke", colors.figure);
+    this.head.setAttribute("fill", colors.figure);
+    this.bike.setAttribute("stroke", colors.bike);
+    this.dashes.setAttribute("stroke", colors.line);
+    this.groundLine.setAttribute("stroke", colors.line);
+  }
+}
+const scenes = [new Scene(document.getElementById("scene1")), new Scene(document.getElementById("scene2"))];
+
+// ---------------- signal strips ----------------
+function strip(canvas, data, min, max, color) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== Math.round(w * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
+  const c = canvas.getContext("2d");
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, w, h);
+  const top = Math.max(max, ...data) * 1.05;
+  c.strokeStyle = css("--line"); c.lineWidth = 1;
+  c.beginPath(); c.moveTo(0, h - 0.5); c.lineTo(w, h - 0.5); c.stroke();
+  c.strokeStyle = color; c.lineWidth = 2; c.lineJoin = "round";
+  c.beginPath();
+  data.forEach((v, i) => {
+    const x = (i / (data.length - 1)) * w, y = h - 2 - ((v - min) / (top - min)) * (h - 6);
+    i ? c.lineTo(x, y) : c.moveTo(x, y);
+  });
+  c.stroke();
+}
+
+// ---------------- frame loop ----------------
+const $ = id => document.getElementById(id);
+const NAMES = { standing: "Standing", walking: "Walking", running: "Running", biking: "Biking" };
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  if (state.demo) demoTick(dt);
+  const online = now - state.lastMsg < 2000;
+  const p = online ? state.pred : null;
+
+  $("dot").className = "dot" + (state.demo ? " demo" : online ? " on" : "");
+  $("status").textContent = state.demo ? "Demo (made-up data)" : online ? "Live from the wearable"
+                          : client && client.connected ? "Connected, waiting for the wearable…" : "Connecting to the broker…";
+
+  const colors = { figure: css("--figure"), bike: css("--bike"), line: css("--line") };
+  const H = heightM();
+  const target = p && p.m2 ? strideHz(p.m2) : DEFAULT_HZ.standing;
+  state.hz += (target - state.hz) * Math.min(1, dt * 3);            // ease between rates
+  const v2 = p && p.m2 ? speedFor(p.m2, state.hz, H) : 0;
+  state.speed += (v2 - state.speed) * Math.min(1, dt * 2);
+  if (online) state.dist += state.speed * dt;
+
+  [1, 2].forEach(m => {
+    const cls = p ? p["m" + m] : null;
+    const hz = cls ? (cls === "standing" ? DEFAULT_HZ.standing : state.hz) : DEFAULT_HZ.standing;
+    const speed = cls ? speedFor(cls, state.hz, H) : 0;
+    scenes[m - 1].draw(cls || "standing", hz, speed, dt, colors);
+    $("act" + m).textContent = cls ? NAMES[cls] : (online ? "No model yet" : "—");
+    $("sw" + m).style.background = cls ? css("--" + cls) : css("--none");
+    $("panel" + m).style.borderColor = cls ? css("--" + cls) : "";
+  });
+  $("detail1").textContent = p && p.peak_name ? `peak ${p.peak_name.slice(-1)} = ${p.peak.toFixed(2)} g` : "";
+  $("detail2").textContent = p && p.cadence != null ? `stride ${p.cadence.toFixed(2)} Hz · rotation ${Math.round(p.gyro)}°/s` : "";
+
+  const mph = state.speed * 2.23694;
+  $("speed").textContent = mph.toFixed(1);
+  $("speedKm").textContent = (state.speed * 3.6).toFixed(1) + " km/h · " + state.speed.toFixed(2) + " m/s";
+  const bike = p && p.m2 === "biking", moving = p && p.m2 && p.m2 !== "standing";
+  $("cadLabel").textContent = bike ? "Pedal cadence" : "Step cadence";
+  $("cadence").textContent = moving ? Math.round(state.hz * (bike ? 60 : 120)) : 0;
+  $("cadUnit").textContent = bike ? "rpm" : "steps/min";
+  $("cadSub").textContent = !moving ? "stride rate from the gyro" : bike ? "5.5 m per pedal turn"
+                        : `stride length ${(state.speed / Math.max(state.hz, 0.1)).toFixed(2)} m`;
+  $("dist").textContent = Math.round(state.dist);
+  $("distMi").textContent = (state.dist / 1609.34).toFixed(2) + " mi";
+  if (p && p.m1 && p.m2) {
+    const same = p.m1 === p.m2;
+    $("agree").textContent = same ? "Agree" : "Disagree";
+    $("agreeSub").textContent = same ? `both say ${p.m2}` : `peak only says ${p.m1}`;
+  } else { $("agree").textContent = "—"; $("agreeSub").innerHTML = "&nbsp;"; }
+
+  strip($("accel"), state.amag, 0, 2, css("--standing"));
+  strip($("gyro"), state.gmag, 0, 100, css("--walking"));
+  $("aNow").textContent = state.amag.at(-1).toFixed(2) + " g";
+  $("gNow").textContent = Math.round(state.gmag.at(-1)) + " deg/s";
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
