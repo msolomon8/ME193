@@ -17,7 +17,7 @@ Both run **on the wearable**. Its LED matrix shows Model 2's answer as a little 
    - Every 0.5 s it turns the last 2 s into features (`gait_features.py`), runs both trees, smooths each answer with a vote over the last 3 decisions, updates the LED figure and publishes the answers on `.../pred`.
 3. **Laptop.**
    - `record.py` saves labeled recordings.
-   - `train.py` trains both models, scores them on people they never saw, draws the figures and sends the new model to the wearable over MQTT (`.../model`, retained), so it doesn't have to be redeployed.
+   - `train.py` trains both models, scores them on data they weren't trained on (people they never saw, or with one person, the held-out half of each recording), draws the figures and sends the new model to the wearable over MQTT (`.../model`, retained), so it doesn't have to be redeployed.
    - `live.html` is the demo page. A stick figure walks, runs or pedals at your measured stride rate next to Model 1's guess, with an estimated speed, cadence and distance. Open it in a browser, or add `?demo` to the address to try it without the wearable.
    - `live.py` is a simpler matplotlib fallback, in case the browser can't reach the broker.
 
@@ -53,7 +53,7 @@ These are textbook ratios, not measurements, so treat the speed as an estimate. 
 | `gait-identifier/` | Copy of the UNO Q app (sketch, `main.py`, `gait_features.py`, `model.json`) |
 | `record.py` | Records labeled data into `data/` |
 | `gait_tree.py` | A small CART decision tree written with numpy (Gini impurity) |
-| `train.py` | Leave-one-person-out comparison of the two models, figures and model export |
+| `train.py` | Leave-one-person-out (or, with one person, leave-one-half-out) comparison of the two models, figures and model export |
 | `live.html` | Live demo page: animated figure for each model, speed, cadence, distance and signals |
 | `live.py` | Matplotlib fallback for the live view |
 | `make_led_frames.py` | Draws the LED-matrix stick-figure frames and writes them into the sketch (preview: `figures/led_frames.png`) |

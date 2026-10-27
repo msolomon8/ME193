@@ -21,6 +21,7 @@ Paste or @-mention this file in a new chat to continue. It covers what was asked
 - The "5060" is an **MPU-6050** (accelerometer + gyro, I²C address 0x68).
 - A **battery pack** powers the UNO Q so the wearable is wireless.
 - **No phone element.** Mia was confused when I said "phone layout"; I had only meant a responsive check of the page at a narrow width. The UI is for the laptop.
+- **Training data: only Mia, and running is done in place** (decided 2026-10-26).
 - **The 4 reflection questions have not been provided yet.** Ask for them before writing the Notion page.
 
 ## 3. Working rules for Mia (from memory and this chat)
@@ -41,7 +42,7 @@ Paste or @-mention this file in a new chat to continue. It covers what was asked
 | Model 1 | A decision tree (depth 3) on **one feature**: the peak acceleration along one axis. `train.py` tries `max_ax`, `max_ay` and `max_az` and keeps the best under cross-validation. In effect it is a few thresholds. |
 | Model 2 | A decision tree (depth 4) on **all 33 features**: per axis (accel and gyro) the mean (tilt and gravity direction), std, max and min, plus accel and gyro magnitude statistics, cadence (Hz) and periodicity |
 | No sklearn | The venv has no scikit-learn, so `gait_tree.py` is a hand-written numpy CART (Gini impurity). The same tree format is walked in pure Python on the board. |
-| Evaluation | **Leave-one-person-out** cross-validation, which matches peers trying it. It falls back to leave-one-recording-out when there's only one person. |
+| Evaluation | **Leave-one-person-out** cross-validation, which matches peers trying it. With only one person it holds out half of each recording at a time (leaving a whole recording out would drop that activity from training). |
 | Cadence | Autocorrelation of the **gyro axis with the largest std**, not the gyro magnitude (\|sin\| would double the frequency). At the ankle that's one cycle per stride. On test signals: 0.9 → 0.94, 1.45 → 1.47, 1.2 → 1.19 Hz. |
 | Speed (UI only) | Stride Hz × stride length. Walking: H·(0.45 + 0.42f). Running: H·(0.2 + 0.9f). Biking: 5.5 m per pedal turn. H is the height entered on the page. These are estimates from textbook ratios, not calibrated. |
 | Comms | MQTT on `broker.hivemq.com` (switched from test.mosquitto.org, which went down on 2026-10-26): `ME193/Rogers/MiaGait/raw` (samples), `/pred` (answers), `/model` (retained; the laptop pushes new models without a redeploy) |
@@ -127,4 +128,4 @@ Remember that Claude must not try to reach the board itself.
 - Model 1 sees only how hard the foot hits. Standing (~1 g), walking (a moderate peak) and running (a big peak) separate well.
 - Biking has **no impact**, so its peak looks like standing or slow walking, and Model 1 confuses them.
 - Model 2 adds **rotation** (the gyro sees every pedal stroke and leg swing), **tilt** (the mean accelerometer reading shows the leg's angle on a bike or when lying on your back) and **cadence**. That separates biking, and it holds up better across different people's strides.
-- Show it with the leave-one-person-out confusion matrices, and live by watching the two figures disagree on live.html.
+- Show it with the cross-validated confusion matrices, and live by watching the two figures disagree on live.html.
