@@ -1,0 +1,10 @@
+{
+  "activity": "walking",
+  "steps": 81,
+  "distance_m": null,
+  "start": 101,
+  "end": 2354,
+  "seconds": 45,
+  "note": "normal; distance removed (typed 26.8 m = 0.33 m/step, half of every other walk)",
+  "recorded": "2026-11-02T19:06:11"
+}

@@ -1,0 +1,5 @@
+name: Step Counter
+description: Wearable step counter. Streams an MPU-6050 (accel + gyro) and an HC-SR04 ultrasonic sensor worn below the right knee over MQTT on ME193/Rogers/MiaSteps. The laptop's neural net counts the steps and the LED matrix shows the count.
+ports: []
+bricks: []
+icon: 👣
