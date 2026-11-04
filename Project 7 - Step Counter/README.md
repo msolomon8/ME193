@@ -25,6 +25,7 @@ live.html ── step count ± uncertainty, distance, cadence, the 5 nets' answe
 - **Conv layer 2:** 8 filters, each 9 long. Then ReLU, and pooling down to 25.
 - **Output:** the 200 numbers are flattened into a linear layer, followed by softplus. The result is the number of steps in the **middle 0.5 s** of the window.
 - **Counting:** the window slides 0.5 s at a time, so every moment is in exactly one middle, and the count is the sum.
+- **Stillness check:** a 2 s window in which the gyro never turns faster than 40 °/s counts as 0 steps. Every training window with a step reached at least 165 °/s. This stops made-up steps from poses the nets never saw, like the wearable lying on a table.
 - **Training:** mean squared error, Adam, backprop. See `train_net()`.
 
 **Labels.**

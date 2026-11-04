@@ -18,6 +18,7 @@ from torch import nn
 import steps_data as sd
 
 DEAD = 0.1    # a window answer below this is counted as 0 (standing still never adds up)
+STILL = 40    # deg/s: a 2 s window whose gyro never gets this fast has no steps
 
 
 class StepNet(nn.Module):
@@ -77,6 +78,13 @@ def window_counts(nets, X):
     Xt = torch.tensor(X)
     out = np.stack([net(Xt * net.mask[None, :, None]).numpy() for net in nets])
     out[out < DEAD] = 0
+    # A shin that never turns faster than STILL deg/s in 2 s took no step. Every training window
+    # with a step reaches 165+ deg/s. Without this, poses never seen in training (the wearable
+    # lying on a table) can give the nets made-up steps.
+    still = np.abs(X[:, 3:6, :]).max(axis=(1, 2)) * sd.GYRO_SCALE < STILL
+    for k, net in enumerate(nets):
+        if net.mask[3:6].all():                       # only nets that are allowed to see the gyro
+            out[k, still] = 0
     return out
 
 
