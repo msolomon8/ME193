@@ -34,7 +34,7 @@ SETTINGS = {
     "stable_seconds": 1.0,      # hold a digit this long
     "clear_seconds": 0.5,       # blank box this long between digits
     "digit_timeout": 30,        # give up after this many seconds without progress
-    "unlock_seconds": 10,       # servo stays open this long
+    "unlock_seconds": 20,       # servo stays open this long (or until the button is pressed)
     "denied_seconds": 3,
     "max_failures": 3,
     "lockout_seconds": 30,

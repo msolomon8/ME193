@@ -16,8 +16,8 @@
 const int LEDS[3] = {2, 3, 4};
 const int BUTTON = 7;
 const int SERVO_PIN = 9;
-const int LOCKED_ANGLE = 0;    // locked = 0 degrees (horn pointing left)
-const int OPEN_ANGLE = 135;    // open = turned clockwise, between up (90) and right (180)
+const int LOCKED_ANGLE = 135;  // locked = turned RIGHT
+const int OPEN_ANGLE = 0;      // open = turned LEFT. (Swap these two numbers to reverse the direction.)
 
 // volatile: set_state runs on the Bridge's thread, loop() reads them
 volatile int mode = 0, digits = 0;
