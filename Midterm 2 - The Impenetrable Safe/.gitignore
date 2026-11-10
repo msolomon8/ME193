@@ -1,0 +1,7 @@
+# Hand photos (personal, kept local)
+finger_lock/data/
+finger_lock/data_duplicates/
+# Local settings (contains the secret code)
+finger_lock/config.json
+# Rendered videos (large; regenerate with movie/make_movie.py)
+movie/*.mp4

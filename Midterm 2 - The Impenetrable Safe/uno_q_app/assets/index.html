@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Impenetrable Safe</title>
+<style>
+  :root { --bg:#0f1216; --card:#181d24; --line:#2a313b; --text:#e8ecf1; --muted:#8b95a3;
+          --accent:#f2b53a; --green:#3ccf6e; --red:#ff5a5a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding:16px 22px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  h1 { margin:0; font-size:20px; letter-spacing:.5px; } h1 span { color:var(--accent); }
+  .pill { border:1px solid var(--line); border-radius:99px; padding:3px 10px; font-size:13px; color:var(--muted); }
+  .pill.ok { color:var(--green); border-color:#2c5a3b; } .pill.bad { color:var(--red); border-color:#5a2c2c; }
+  main { max-width:980px; margin:0 auto; padding:22px 16px; display:grid; grid-template-columns: 1.3fr 1fr; gap:18px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; }
+  .safe { text-align:center; transition: border-color .3s, box-shadow .3s; }
+  .state { font-size:44px; font-weight:800; letter-spacing:2px; margin:6px 0 4px; }
+  .msg { font-size:20px; min-height:30px; }
+  .sub { color:var(--muted); min-height:22px; margin-top:4px; }
+  .digits { display:flex; justify-content:center; gap:16px; margin:22px 0 14px; }
+  .d { width:70px; height:70px; border-radius:14px; border:2px solid var(--line); display:grid; place-items:center;
+       font-size:30px; color:var(--muted); transition: all .25s; }
+  .d.on { border-color:var(--green); background:rgba(60,207,110,.15); color:var(--green); }
+  .d.next { border-color:var(--accent); color:var(--accent); animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { box-shadow:0 0 0 6px rgba(242,181,58,.15); } }
+  .hold { height:12px; background:#0b0e12; border-radius:99px; overflow:hidden; margin:6px auto 0; max-width:340px; }
+  .hold div { height:100%; width:0; background:var(--accent); transition: width .15s; }
+  .leds { display:flex; justify-content:center; gap:26px; margin-top:20px; color:var(--muted); font-size:13px; }
+  .led { width:22px; height:22px; border-radius:50%; background:#2a2f36; margin:0 auto 6px; transition: all .1s; }
+  .led.on { background:#ffdf6b; box-shadow:0 0 14px #ffdf6b; }
+  button { background:var(--accent); color:#1a1300; border:0; border-radius:10px; padding:12px 22px; font-size:17px;
+           font-weight:700; cursor:pointer; margin-top:20px; }
+  button:active { transform: translateY(1px); }
+  img { width:100%; border-radius:10px; background:#000; display:block; aspect-ratio:16/9; object-fit:cover; }
+  .events { margin-top:14px; font-size:13px; color:var(--muted); max-height:190px; overflow:auto; }
+  .events div { padding:3px 0; border-bottom:1px solid #20262e; }
+  .safe.UNLOCKED { border-color:var(--green); box-shadow:0 0 40px rgba(60,207,110,.25); }
+  .safe.UNLOCKED .state { color:var(--green); }
+  .safe.DENIED, .safe.LOCKOUT { border-color:var(--red); } .safe.DENIED .state, .safe.LOCKOUT .state { color:var(--red); }
+  .safe.READING .state, .safe.WAIT_CLEAR .state { color:var(--accent); }
+  .big-lock { font-size:64px; line-height:1; }
+  .collect { grid-column: 1 / -1; }
+  .classes { display:grid; grid-template-columns: repeat(7, 1fr); gap:8px; margin-top:12px; }
+  .cls { background:#11151a; border:1px solid var(--line); border-radius:10px; padding:10px 4px; text-align:center;
+         cursor:pointer; user-select:none; }
+  .cls b { display:block; font-size:24px; } .cls small { color:var(--muted); }
+  .cls:hover { border-color:var(--accent); }
+  .cls.good small { color:var(--green); }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; color:var(--muted); }
+  .row button { margin:0; padding:8px 14px; font-size:14px; background:#2a313b; color:var(--text); }
+  #capMsg { color:var(--accent); font-weight:600; min-height:22px; margin-top:10px; }
+  select { background:#11151a; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>THE <span>IMPENETRABLE</span> SAFE</h1>
+  <span id="conn" class="pill">connecting…</span>
+  <span id="cam" class="pill">camera…</span>
+</header>
+<main>
+  <section class="card safe" id="safe">
+    <div class="big-lock" id="icon">🔒</div>
+    <div class="state" id="state">LOCKED</div>
+    <div class="msg" id="msg">Press the button to start</div>
+    <div class="sub" id="sub"></div>
+    <div class="digits"><div class="d" id="d0">1</div><div class="d" id="d1">2</div><div class="d" id="d2">3</div></div>
+    <div class="hold"><div id="hold"></div></div>
+    <div class="leds">
+      <div><div class="led" id="l0"></div>D2</div><div><div class="led" id="l1"></div>D3</div><div><div class="led" id="l2"></div>D4</div>
+    </div>
+    <button id="startBtn">Start (same as button D7)</button>
+  </section>
+  <section class="card">
+    <img id="snap" alt="camera">
+    <div class="sub">Camera view. The green box is what the network reads.</div>
+    <div class="events" id="events"></div>
+  </section>
+  <section class="card collect">
+    <b>Take training photos through this camera</b>
+    <div class="sub">Hold up fingers between the red edges, then click a number or press its key
+      (<b>0</b>–<b>5</b>, <b>B</b> = blank). Move your hand a little while it takes the photos.
+      Aim for about 150 of each, with both hands and different positions.</div>
+    <div class="classes" id="classes"></div>
+    <div class="row">Photos per burst
+      <select id="burstN"><option>10</option><option selected>20</option><option>40</option></select>
+      <button id="undoBtn">Undo last burst</button></div>
+    <div id="capMsg"></div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let lastEvent = 0, seenFirst = false;
+
+const TEXT = {
+  IDLE:       ["🔒", "LOCKED",    "Press the button to start"],
+  READING:    ["🔒", "READY",     "Show digit {n} and hold it steady"],
+  WAIT_CLEAR: ["🔒", "READY",     "Digit {d} accepted ✓ — now take your hand away"],
+  UNLOCKED:   ["🔓", "UNLOCKED",  "Welcome! The safe is open"],
+  DENIED:     ["⛔", "DENIED",    "Wrong code — try again"],
+  LOCKOUT:    ["⛔", "LOCKED OUT","Too many wrong tries"],
+};
+const EVENT_TEXT = {
+  start: () => "Button pressed — ready for digit 1", digit: e => `Digit ${e.info.position} accepted`,
+  ready_next: e => `Ready for digit ${e.info.position}`, unlock: () => "✅ Correct code — servo OPEN",
+  denied: () => "❌ Wrong code", lockout: () => "⛔ Locked out", timeout: () => "Timed out, relocked",
+  relock: () => "Relocked", restart: () => "Restarted", ready_idle: () => "Ready",
+};
+
+function render(s) {
+  const L = s.lock, st = L.state;
+  const [icon, title, msg] = TEXT[st] || ["🔒", st, ""];
+  $("safe").className = "card safe " + st;
+  $("icon").textContent = icon;
+  $("state").textContent = title;
+  $("msg").textContent = msg.replace("{n}", L.digits + 1).replace("{d}", L.digits);
+
+  let sub = "";
+  if (st === "READING" || st === "WAIT_CLEAR") {
+    if (s.sees == null) sub = "no camera picture";
+    else {
+      const what = s.sees === "blank" ? "nothing" : s.sees === "0" ? "0 (fist)" : s.sees;
+      sub = `sees ${what} · ${Math.round(s.sure * 100)}% sure`;
+      if (st === "READING" && s.sees !== "blank" && s.sure < s.need) sub += ` (needs ${Math.round(s.need * 100)}%)`;
+    }
+  } else if (st === "UNLOCKED" || st === "LOCKOUT") {
+    sub = L.remaining != null ? `${st === "UNLOCKED" ? "relocks" : "try again"} in ${Math.ceil(L.remaining)} s` : "";
+  }
+  $("sub").textContent = sub;
+
+  for (let i = 0; i < 3; i++) {
+    const d = $("d" + i), done = i < L.digits || st === "UNLOCKED";
+    d.className = "d" + (done ? " on" : "") + (st === "READING" && i === L.digits ? " next" : "");
+    d.textContent = done ? "✓" : String(i + 1);
+  }
+  $("hold").style.width = (st === "READING" ? L.hold * 100 : 0) + "%";
+
+  // mirror the real LEDs D2 D3 D4 (same patterns as the sketch)
+  const t = Date.now(), flash = Math.floor(t / 250) % 2 === 0, fast = Math.floor(t / 100) % 2 === 0;
+  for (let i = 0; i < 3; i++) {
+    let on = false;
+    if (st === "READING" || st === "WAIT_CLEAR") on = i < L.digits;
+    if (st === "UNLOCKED") on = flash;
+    if (st === "DENIED") on = fast;
+    $("l" + i).className = "led" + (on ? " on" : "");
+  }
+
+  $("cam").textContent = s.camera_ok ? `camera ✓ · ${s.ms} ms/frame` : "no camera";
+  $("cam").className = "pill " + (s.camera_ok ? "ok" : "bad");
+
+  const fresh = s.events.filter(e => e.id > lastEvent);
+  if (!seenFirst) { seenFirst = true; lastEvent = Math.max(0, ...s.events.map(e => e.id)); return; }
+  fresh.forEach(e => {
+    lastEvent = Math.max(lastEvent, e.id);
+    const txt = (EVENT_TEXT[e.name] || (() => e.name))(e);
+    $("events").insertAdjacentHTML("afterbegin", `<div>${new Date(e.t * 1000).toLocaleTimeString()} · ${txt}</div>`);
+  });
+}
+
+async function poll() {
+  try {
+    const s = await fetch("/api/state", {cache: "no-store"}).then(r => r.json());
+    $("conn").textContent = "connected to UNO Q"; $("conn").className = "pill ok";
+    render(s);
+    renderCollect(s);
+  } catch (e) {
+    $("conn").textContent = "not connected"; $("conn").className = "pill bad";
+  }
+  setTimeout(poll, 250);
+}
+poll();
+setInterval(() => { $("snap").src = "/api/snapshot?t=" + Date.now(); }, 600);
+$("startBtn").onclick = () => fetch("/api/button", {method: "POST"});
+
+// ---- collecting photos ----
+const CLASSES = ["0", "1", "2", "3", "4", "5", "blank"];
+CLASSES.forEach((name, i) => {
+  $("classes").insertAdjacentHTML("beforeend",
+    `<div class="cls" id="cls${i}"><b>${name}</b><small id="cnt${i}">0 photos</small></div>`);
+  $("cls" + i).onclick = () => takePhotos(i);
+});
+let wasBusy = false;
+function takePhotos(i) {
+  const n = +$("burstN").value;
+  fetch(`/api/capture?label=${i}&count=${n}`, {method: "POST"}).then(r => r.json()).then(r => {
+    $("capMsg").textContent = r.error ? r.error : `📸 Taking ${n} photos of "${CLASSES[i]}"… keep moving your hand a little`;
+  });
+}
+$("undoBtn").onclick = () => fetch("/api/undo", {method: "POST"});
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (/^[0-5]$/.test(e.key)) takePhotos(+e.key);
+  if (e.key.toLowerCase() === "b") takePhotos(6);
+});
+function renderCollect(s) {
+  if (!s.counts) return;
+  CLASSES.forEach((name, i) => {
+    const n = s.counts[name] || 0;
+    $("cnt" + i).textContent = n + " photos";
+    $("cls" + i).className = "cls" + (n >= 150 ? " good" : "");
+  });
+  if (!s.capture.busy && s.capture.message && (wasBusy || !$("capMsg").textContent)) $("capMsg").textContent = "✓ " + s.capture.message;
+  wasBusy = s.capture.busy;
+}
+</script>
+</body>
+</html>

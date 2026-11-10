@@ -1,0 +1,6 @@
+name: Impenetrable Safe
+icon: 🔐
+description: Show 3 digits with your fingers to the webcam; a CNN reads them and the servo opens the safe.
+
+bricks:
+  - arduino:web_ui
