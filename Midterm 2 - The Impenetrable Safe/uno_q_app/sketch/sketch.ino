@@ -1,6 +1,7 @@
 // The Impenetrable Safe - MCU side (STM32 on the UNO Q)
 //
-// Button D7 (to GND, uses the internal pull-up)  -> tells Python "button_pressed"
+// Button D7 (to GND, uses the internal pull-up)  -> tells Python "button_pressed" (short press)
+//                                                  or "button_held" (held down 3 s)
 // LEDs  D2 D3 D4 (each through its 120 ohm resistor to GND)
 // Servo signal D9 (brown -> GND, red -> 5V, orange -> D9)
 //
@@ -10,14 +11,16 @@
 //   mode 2 UNLOCKED  all 3 LEDs flash, servo turns to OPEN_ANGLE
 //   mode 3 DENIED    all 3 LEDs blink fast
 //   mode 4 LOCKOUT   LEDs chase back and forth
+//   mode 5 NEW CODE  choosing a new code: entered digits solid, the next LED blinks slowly, servo open
+//   mode 6 SAVED     new code saved: LEDs sweep D2 -> D3 -> D4, servo open
 
 #include "Arduino_RouterBridge.h"
 
 const int LEDS[3] = {2, 3, 4};
 const int BUTTON = 7;
 const int SERVO_PIN = 9;
-const int LOCKED_ANGLE = 135;  // locked = turned RIGHT
-const int OPEN_ANGLE = 0;      // open = turned LEFT. (Swap these two numbers to reverse the direction.)
+const int LOCKED_ANGLE = 180;  // locked = all the way to the other side (the opposite of 0)
+const int OPEN_ANGLE = 90;     // open = pointing UP. It only ever moves between 90 and 180.
 
 // volatile: set_state runs on the Bridge's thread, loop() reads them
 volatile int mode = 0, digits = 0;
@@ -25,8 +28,12 @@ volatile bool servoOpen = false;
 
 int shownMode = -1;
 unsigned long modeStart = 0;
-int lastButton = HIGH;
-unsigned long lastPressMs = 0;
+int lastButton = HIGH;              // debounced button state
+int lastRaw = HIGH;
+unsigned long rawChangedMs = 0;
+unsigned long pressStartMs = 0;
+bool holdSent = false;
+const unsigned long HOLD_MS = 3000;   // hold this long = "button_held"
 
 // servo: we make the 50 Hz pulses ourselves (works on any core), for 1.5 s after each move
 volatile int servoAngle = LOCKED_ANGLE;
@@ -78,6 +85,14 @@ void updateLeds() {
   } else if (mode == 3) {                // DENIED
     bool on = (t / 100) % 2 == 0;
     showLeds(on, on, on);
+  } else if (mode == 5) {                // NEW CODE: next LED blinks slowly
+    bool blink = (t / 400) % 2 == 0;
+    showLeds(digits >= 1 || (digits == 0 && blink),
+             digits >= 2 || (digits == 1 && blink),
+             digits >= 3 || (digits == 2 && blink));
+  } else if (mode == 6) {                // SAVED: sweep D2 -> D3 -> D4 -> all on
+    int k = (t / 120) % 4;
+    showLeds(k == 0 || k == 3, k == 1 || k == 3, k == 2 || k == 3);
   } else if (mode == 4) {                // LOCKOUT
     int k = (t / 150) % 4;
     int led = (k == 3) ? 1 : k;          // 0,1,2,1,0,1,2...
@@ -99,12 +114,27 @@ void updateServo() {
 }
 
 void readButton() {
-  int b = digitalRead(BUTTON);
-  if (b == LOW && lastButton == HIGH && millis() - lastPressMs > 250) {
-    lastPressMs = millis();
+  // Debounce: only believe the pin once it has stayed the same for 30 ms.
+  // A short press is sent when you LET GO; holding 3 s sends "button_held" instead.
+  int raw = digitalRead(BUTTON);
+  unsigned long now = millis();
+  if (raw != lastRaw) {
+    lastRaw = raw;
+    rawChangedMs = now;
+  }
+  if (now - rawChangedMs < 30) return;            // still bouncing
+  if (raw == LOW && lastButton == HIGH) {         // pressed down
+    pressStartMs = now;
+    holdSent = false;
+  }
+  if (raw == LOW && !holdSent && now - pressStartMs >= HOLD_MS) {   // still held after 3 s
+    holdSent = true;
+    Bridge.notify("button_held");
+  }
+  if (raw == HIGH && lastButton == LOW && !holdSent) {   // let go before 3 s
     Bridge.notify("button_pressed");
   }
-  lastButton = b;
+  lastButton = raw;
 }
 
 void loop() {

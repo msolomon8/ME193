@@ -52,6 +52,16 @@
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; color:var(--muted); }
   .row button { margin:0; padding:8px 14px; font-size:14px; background:#2a313b; color:var(--text); }
   #capMsg { color:var(--accent); font-weight:600; min-height:22px; margin-top:10px; }
+  .safe.NEW_CODE, .safe.NEW_CODE_CLEAR, .safe.CODE_SAVED { border-color:#4aa3ff; box-shadow:0 0 40px rgba(74,163,255,.2); }
+  .safe.NEW_CODE .state, .safe.NEW_CODE_CLEAR .state, .safe.CODE_SAVED .state { color:#4aa3ff; }
+  #codeBtn { background:#4aa3ff; color:#04121f; margin-left:8px; display:none; }
+  .intruders { grid-column: 1 / -1; }
+  #caught { display:none; margin-top:16px; } #caught img { border:2px solid var(--red); }
+  #caught div { color:var(--red); font-weight:700; margin-bottom:6px; }
+  .gallery { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:12px; margin-top:12px; }
+  .gallery a { display:block; } .gallery img { aspect-ratio:16/9; border:1px solid #5a2c2c; }
+  .gallery small { color:var(--muted); display:block; margin-top:4px; }
+  .empty { color:var(--muted); margin-top:10px; }
   select { background:#11151a; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px; }
 </style>
 </head>
@@ -67,17 +77,24 @@
     <div class="state" id="state">LOCKED</div>
     <div class="msg" id="msg">Press the button to start</div>
     <div class="sub" id="sub"></div>
+    <div id="caught"><div>🖐️ INTRUDER HAND!</div><img id="caughtImg" alt="intruder hand"></div>
     <div class="digits"><div class="d" id="d0">1</div><div class="d" id="d1">2</div><div class="d" id="d2">3</div></div>
     <div class="hold"><div id="hold"></div></div>
     <div class="leds">
       <div><div class="led" id="l0"></div>D2</div><div><div class="led" id="l1"></div>D3</div><div><div class="led" id="l2"></div>D4</div>
     </div>
-    <button id="startBtn">Start (same as button D7)</button>
+    <button id="startBtn">Start (same as button D7)</button><button id="codeBtn">Change code</button>
   </section>
   <section class="card">
     <img id="snap" alt="camera">
     <div class="sub">Camera view. The green box is what the network reads.</div>
     <div class="events" id="events"></div>
+  </section>
+  <section class="card intruders">
+    <b>🚨 Intruder hands</b> <span class="sub" id="intrCount"></span>
+    <div class="sub">Every wrong code takes a picture of the hand that entered it. Newest first; the board keeps the last 30.</div>
+    <div class="gallery" id="gallery"></div>
+    <div class="row"><button id="clearIntr">Delete all intruder hands</button></div>
   </section>
   <section class="card collect">
     <b>Take training photos through this camera</b>
@@ -102,12 +119,18 @@ const TEXT = {
   UNLOCKED:   ["🔓", "UNLOCKED",  "Welcome! The safe is open"],
   DENIED:     ["⛔", "DENIED",    "Wrong code — try again"],
   LOCKOUT:    ["⛔", "LOCKED OUT","Too many wrong tries"],
+  NEW_CODE:       ["🔑", "NEW CODE",  "Show new digit {n} and hold it steady"],
+  NEW_CODE_CLEAR: ["🔑", "NEW CODE",  "New digit {d} saved ✓ — now take your hand away"],
+  CODE_SAVED:     ["🔑", "CODE SAVED","Your new code is set"],
 };
+const READING_LIKE = ["READING", "NEW_CODE"], CLEAR_LIKE = ["WAIT_CLEAR", "NEW_CODE_CLEAR"];
 const EVENT_TEXT = {
   start: () => "Button pressed — ready for digit 1", digit: e => `Digit ${e.info.position} accepted`,
   ready_next: e => `Ready for digit ${e.info.position}`, unlock: () => "✅ Correct code — servo OPEN",
   denied: () => "❌ Wrong code", lockout: () => "⛔ Locked out", timeout: () => "Timed out, relocked",
   relock: () => "Relocked", restart: () => "Restarted", ready_idle: () => "Ready",
+  code_start: () => "🔑 Choosing a new code", code_changed: () => "🔑 New code saved",
+  code_cancel: () => "Code change cancelled (old code kept)",
 };
 
 function render(s) {
@@ -119,24 +142,38 @@ function render(s) {
   $("msg").textContent = msg.replace("{n}", L.digits + 1).replace("{d}", L.digits);
 
   let sub = "";
-  if (st === "READING" || st === "WAIT_CLEAR") {
+  if (READING_LIKE.includes(st) || CLEAR_LIKE.includes(st)) {
     if (s.sees == null) sub = "no camera picture";
     else {
       const what = s.sees === "blank" ? "nothing" : s.sees === "0" ? "0 (fist)" : s.sees;
       sub = `sees ${what} · ${Math.round(s.sure * 100)}% sure`;
-      if (st === "READING" && s.sees !== "blank" && s.sure < s.need) sub += ` (needs ${Math.round(s.need * 100)}%)`;
+      if (READING_LIKE.includes(st) && s.sees !== "blank" && s.sure < s.need) sub += ` (needs ${Math.round(s.need * 100)}%)`;
     }
   } else if (st === "UNLOCKED" || st === "LOCKOUT") {
     sub = L.remaining != null ? `${st === "UNLOCKED" ? "relocks" : "try again"} in ${Math.ceil(L.remaining)} s` : "";
+    if (st === "UNLOCKED") sub += " · hold D7 for 3 s to change the code";
+  }
+  if (st === "NEW_CODE" || st === "NEW_CODE_CLEAR") sub = (sub ? sub + " · " : "") + "press D7 to cancel";
+  $("codeBtn").style.display = st === "UNLOCKED" ? "inline-block" : "none";
+  const caught = st === "DENIED" || st === "LOCKOUT";
+  if (caught && !wasCaught) {          // a wrong code just happened: fetch the brand-new photo
+    newestPhoto = null;
+    setTimeout(loadIntruders, 400); setTimeout(loadIntruders, 1200);
+  }
+  wasCaught = caught;
+  $("caught").style.display = caught && newestPhoto ? "block" : "none";
+  if (caught && newestPhoto && $("caughtImg").dataset.name !== newestPhoto) {
+    $("caughtImg").dataset.name = newestPhoto;
+    $("caughtImg").src = "/api/intruder?name=" + newestPhoto;
   }
   $("sub").textContent = sub;
 
   for (let i = 0; i < 3; i++) {
-    const d = $("d" + i), done = i < L.digits || st === "UNLOCKED";
-    d.className = "d" + (done ? " on" : "") + (st === "READING" && i === L.digits ? " next" : "");
+    const d = $("d" + i), done = i < L.digits || st === "UNLOCKED" || st === "CODE_SAVED";
+    d.className = "d" + (done ? " on" : "") + (READING_LIKE.includes(st) && i === L.digits ? " next" : "");
     d.textContent = done ? "✓" : String(i + 1);
   }
-  $("hold").style.width = (st === "READING" ? L.hold * 100 : 0) + "%";
+  $("hold").style.width = (READING_LIKE.includes(st) ? L.hold * 100 : 0) + "%";
 
   // mirror the real LEDs D2 D3 D4 (same patterns as the sketch)
   const t = Date.now(), flash = Math.floor(t / 250) % 2 === 0, fast = Math.floor(t / 100) % 2 === 0;
@@ -145,6 +182,8 @@ function render(s) {
     if (st === "READING" || st === "WAIT_CLEAR") on = i < L.digits;
     if (st === "UNLOCKED") on = flash;
     if (st === "DENIED") on = fast;
+    if (st === "NEW_CODE" || st === "NEW_CODE_CLEAR") on = i < L.digits || (i === L.digits && Math.floor(t / 400) % 2 === 0);
+    if (st === "CODE_SAVED") { const k = Math.floor(t / 120) % 4; on = k === i || k === 3; }
     $("l" + i).className = "led" + (on ? " on" : "");
   }
 
@@ -174,6 +213,31 @@ async function poll() {
 poll();
 setInterval(() => { $("snap").src = "/api/snapshot?t=" + Date.now(); }, 600);
 $("startBtn").onclick = () => fetch("/api/button", {method: "POST"});
+$("codeBtn").onclick = () => fetch("/api/button_hold", {method: "POST"});
+
+// ---- intruder photos ----
+let shownPhotos = "", newestPhoto = null, wasCaught = false;
+function photoTime(name) {   // "20261110-164512.jpg" -> readable date
+  const m = name.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/);
+  return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]).toLocaleString() : name;
+}
+async function loadIntruders() {
+  try {
+    const r = await fetch("/api/intruders", {cache: "no-store"}).then(r => r.json());
+    newestPhoto = r.photos[0] || null;
+    const key = r.photos.join(",");
+    if (key !== shownPhotos) {
+      shownPhotos = key;
+      $("intrCount").textContent = r.photos.length ? `· ${r.photos.length}` : "";
+      $("gallery").innerHTML = r.photos.length ? r.photos.map(n =>
+        `<a href="/api/intruder?name=${n}" target="_blank"><img src="/api/intruder?name=${n}" alt="intruder hand" loading="lazy"><small>${photoTime(n)}</small></a>`
+      ).join("") : `<div class="empty">No wrong codes yet.</div>`;
+    }
+  } catch (e) {}
+}
+loadIntruders();
+setInterval(loadIntruders, 3000);
+$("clearIntr").onclick = () => { if (confirm("Delete all intruder hand photos?")) fetch("/api/intruders/clear", {method: "POST"}).then(loadIntruders); };
 
 // ---- collecting photos ----
 const CLASSES = ["0", "1", "2", "3", "4", "5", "blank"];

@@ -12,6 +12,12 @@ States:
   DENIED      wrong code: red light, back to IDLE after `denied_seconds`.
   LOCKOUT     `max_failures` wrong codes in a row: ignore everything for `lockout_seconds`.
 
+Changing the code (only while UNLOCKED - you already proved you know the old one):
+  hold the button 3 s -> NEW_CODE / NEW_CODE_CLEAR: show 3 new digits, with blanks between,
+  exactly like entering a code. The safe stays open the whole time.
+  CODE_SAVED  the new code is stored, LEDs confirm for `saved_seconds`, then back to UNLOCKED.
+  A short press (or `digit_timeout` with no progress) cancels and keeps the old code.
+
 Any time no progress is made for `digit_timeout` seconds while reading, it gives up
 and goes back to IDLE (so a half-entered code doesn't sit there forever).
 
@@ -21,6 +27,10 @@ NOT_A_DIGIT = (6,)   # 6 = blank (copied from config.py)
 
 IDLE, READING, WAIT_CLEAR, UNLOCKED, DENIED, LOCKOUT = (
     "IDLE", "READING", "WAIT_CLEAR", "UNLOCKED", "DENIED", "LOCKOUT")
+NEW_CODE, NEW_CODE_CLEAR, CODE_SAVED = "NEW_CODE", "NEW_CODE_CLEAR", "CODE_SAVED"
+SHOW_DIGIT = (READING, NEW_CODE)           # waiting for a digit
+SHOW_BLANK = (WAIT_CLEAR, NEW_CODE_CLEAR)  # waiting for the hand to go away
+SETTING = (NEW_CODE, NEW_CODE_CLEAR)
 
 
 class LockPolicy:
@@ -46,23 +56,45 @@ class LockPolicy:
         elif self.state in (READING, WAIT_CLEAR):
             self._start_reading(now)      # pressing again restarts the code
             self._emit("restart")
+        elif self.state in SETTING:
+            self._back_to_unlocked(now)   # short press = cancel, keep the old code
+            self._emit("code_cancel")
+
+    def hold_button(self, now):
+        """Button held down for 3 s. While unlocked: start choosing a new code.
+        Any other time it just counts as a normal press."""
+        if self.state == UNLOCKED:
+            self.digits = []
+            self.candidate = self.candidate_since = self.clear_since = self.until = None
+            self.hold_fraction = 0.0
+            self.last_progress = now
+            self._set(NEW_CODE)
+            self._emit("code_start")
+        elif self.state not in SETTING:
+            self.press_button(now)
 
     def update(self, probs, now):
         """Call every frame with the 7 probabilities (or None if no camera/model)."""
-        if self.state in (UNLOCKED, DENIED, LOCKOUT):
+        if self.state in (UNLOCKED, DENIED, LOCKOUT, CODE_SAVED):
             if now >= self.until:
                 if self.state == UNLOCKED:
                     self._relock("timer")
+                elif self.state == CODE_SAVED:
+                    self._back_to_unlocked(now)
                 else:
                     self._set(IDLE)
                     self._emit("ready_idle")
             return
 
-        if self.state not in (READING, WAIT_CLEAR):
+        if self.state not in SHOW_DIGIT + SHOW_BLANK:
             return
         if now - self.last_progress > self.cfg["digit_timeout"]:
-            self._emit("timeout")
-            self._reset()
+            if self.state in SETTING:
+                self._back_to_unlocked(now)
+                self._emit("code_cancel")
+            else:
+                self._emit("timeout")
+                self._reset()
             return
         if probs is None:
             return
@@ -70,7 +102,7 @@ class LockPolicy:
         pred = max(range(len(probs)), key=lambda i: probs[i])
         sure = probs[pred] >= self.cfg["min_confidence"]
 
-        if self.state == READING:
+        if self.state in SHOW_DIGIT:
             if sure and pred not in NOT_A_DIGIT:
                 if pred != self.candidate:
                     self.candidate, self.candidate_since = pred, now
@@ -81,12 +113,12 @@ class LockPolicy:
             else:
                 self.candidate, self.candidate_since, self.hold_fraction = None, None, 0.0
 
-        elif self.state == WAIT_CLEAR:
+        elif self.state in SHOW_BLANK:
             if sure and pred in NOT_A_DIGIT:
                 if self.clear_since is None:
                     self.clear_since = now
                 if now - self.clear_since >= self.cfg["clear_seconds"]:
-                    self._set(READING)
+                    self._set(NEW_CODE if self.state in SETTING else READING)
                     self.last_progress = now
                     self._emit("ready_next", position=len(self.digits) + 1)
             else:
@@ -97,12 +129,27 @@ class LockPolicy:
         self.digits.append(digit)
         self.candidate, self.candidate_since, self.hold_fraction = None, None, 0.0
         self.last_progress = now
+        setting = self.state in SETTING
         self._emit("digit", digit=digit, position=len(self.digits))
         if len(self.digits) == 3:
-            self._check(now)
+            self._save_new_code(now) if setting else self._check(now)
         else:
             self.clear_since = None
-            self._set(WAIT_CLEAR)
+            self._set(NEW_CODE_CLEAR if setting else WAIT_CLEAR)
+
+    def _save_new_code(self, now):
+        self.cfg["secret_code"] = list(self.digits)   # main.py also writes it to a file
+        self.digits = []
+        self._set(CODE_SAVED)
+        self.until = now + self.cfg.get("saved_seconds", 3)
+        self._emit("code_changed")
+
+    def _back_to_unlocked(self, now):
+        self.digits = []
+        self.candidate = self.candidate_since = self.clear_since = None
+        self.hold_fraction = 0.0
+        self._set(UNLOCKED)
+        self.until = now + self.cfg["unlock_seconds"]
 
     def _check(self, now):
         if self.digits == list(self.cfg["secret_code"]):
@@ -157,9 +204,9 @@ class LockPolicy:
             "candidate": self.candidate,
             "remaining": None if remaining is None else round(remaining, 1),
             # what the physical outputs should be doing
-            "scan_light": self.state in (READING, WAIT_CLEAR),
+            "scan_light": self.state in SHOW_DIGIT + SHOW_BLANK,
             "progress_leds": len(self.digits),
-            "green": self.state == UNLOCKED,
+            "green": self.state in (UNLOCKED, CODE_SAVED),
             "red": self.state in (DENIED, LOCKOUT),
-            "servo_open": self.state == UNLOCKED,
+            "servo_open": self.state in (UNLOCKED, CODE_SAVED) + SETTING,
         }

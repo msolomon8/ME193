@@ -11,8 +11,15 @@ The webpage (assets/index.html) is served by the WebUI brick on port 7000 and as
 
 Flow: press D7 -> LEDs flash, page says "Ready" -> show digit 1 -> LED D2 + page -> blank ->
 digit 2 -> LED D3 -> blank -> digit 3 -> LED D4 -> all LEDs flash, page says UNLOCKED,
-servo turns 0 -> 90 degrees.
+servo turns left to open.
+
+Extras:
+  * Change the code: while UNLOCKED, hold D7 for 3 s, then show 3 new digits (blank between).
+    The new code is saved to data/secret_code.json, so it survives a restart.
+  * Intruder photos: every wrong code takes a picture from the camera. The webpage shows them.
 """
+import json
+import re
 import threading
 import time
 from collections import deque
@@ -29,7 +36,7 @@ from safe_net import NumpyCNN
 # Settings (same meaning as in the laptop control panel)
 # ---------------------------------------------------------------------------
 SETTINGS = {
-    "secret_code": [2, 4, 5],   # three DIFFERENT digits 0-5 (0 = fist)
+    "secret_code": [2, 4, 5],   # starting code, digits 0-5 (0 = fist); a code set with the button replaces it
     "min_confidence": 0.80,     # network must be at least this sure
     "stable_seconds": 1.0,      # hold a digit this long
     "clear_seconds": 0.5,       # blank box this long between digits
@@ -38,21 +45,38 @@ SETTINGS = {
     "denied_seconds": 3,
     "max_failures": 3,
     "lockout_seconds": 30,
+    "saved_seconds": 3,         # LEDs show "saved" this long after a new code is set
 }
 FPS = 8                         # frames per second to process
 CLASS_NAMES = ["0", "1", "2", "3", "4", "5", "blank"]
 # mode numbers sent to the sketch (it turns them into LED patterns)
-MODES = {"IDLE": 0, "READING": 1, "WAIT_CLEAR": 1, "UNLOCKED": 2, "DENIED": 3, "LOCKOUT": 4}
+MODES = {"IDLE": 0, "READING": 1, "WAIT_CLEAR": 1, "UNLOCKED": 2, "DENIED": 3, "LOCKOUT": 4,
+         "NEW_CODE": 5, "NEW_CODE_CLEAR": 5, "CODE_SAVED": 6}
 
 HERE = Path(__file__).parent
+DATA_DIR = HERE.parent / "data"              # = ~/ArduinoApps/impenetrable-safe/data on the board
+CODE_FILE = DATA_DIR / "secret_code.json"
+INTRUDER_DIR = DATA_DIR / "intruders"
+MAX_INTRUDER_PHOTOS = 30
+
+try:   # a code chosen with the button (saved last time) replaces the starting code
+    saved_code = json.loads(CODE_FILE.read_text())
+    if isinstance(saved_code, list) and len(saved_code) == 3 and all(d in range(6) for d in saved_code):
+        SETTINGS["secret_code"] = saved_code
+        print("[safe] using the code saved with the button", flush=True)
+except FileNotFoundError:
+    pass
+except Exception as e:
+    print(f"[safe] couldn't read {CODE_FILE.name} ({e}); using the starting code", flush=True)
 net = NumpyCNN(HERE / "finger_cnn.npz")
 print(f"[safe] network loaded ({net.val_acc:.0%} validation accuracy), crop = {net.roi}", flush=True)
 
 
 # ---------------------------------------------------------------------------
 # Button: the sketch notifies us; we only count presses here (handlers must be quick)
+#   short press -> "button_pressed"      held 3 s -> "button_held"
 # ---------------------------------------------------------------------------
-presses = {"n": 0}
+presses = {"n": 0, "held": 0}
 presses_lock = threading.Lock()
 
 
@@ -61,7 +85,13 @@ def button_pressed():
         presses["n"] += 1
 
 
+def button_held():
+    with presses_lock:
+        presses["held"] += 1
+
+
 Bridge.provide("button_pressed", button_pressed)
+Bridge.provide("button_held", button_held)
 
 
 # ---------------------------------------------------------------------------
@@ -150,10 +180,36 @@ events = deque(maxlen=30)
 event_id = [0]
 
 
+intruder = {"pending": None}    # set on a wrong code; the main loop takes the photo
+
+
 def on_event(name, **info):
     event_id[0] += 1
     events.append({"id": event_id[0], "name": name, "info": info, "t": time.time()})
-    print(f"[safe] event: {name} {info if info else ''}", flush=True)
+    shown = {k: v for k, v in info.items() if k not in ("digit", "entered")}   # never print codes
+    print(f"[safe] event: {name} {shown if shown else ''}", flush=True)
+    if name in ("denied", "lockout"):
+        intruder["pending"] = "INTRUDER HAND! " + ("LOCKED OUT" if name == "lockout" else f"WRONG CODE ({info.get('failures', '?')} of {SETTINGS['max_failures']})")
+    if name == "code_changed":
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            CODE_FILE.write_text(json.dumps(SETTINGS["secret_code"]))
+        except Exception as e:
+            print(f"[safe] couldn't save the new code ({e}); it works until the app restarts", flush=True)
+
+
+def save_intruder_photo(frame, label):
+    """Full camera picture with the time and reason stamped on it; keeps the newest 30."""
+    INTRUDER_DIR.mkdir(parents=True, exist_ok=True)
+    img = cv2.resize(frame, (960, 540), interpolation=cv2.INTER_AREA)
+    stamp = time.strftime("%a %b %d  %I:%M:%S %p")
+    cv2.rectangle(img, (0, 0), (960, 44), (0, 0, 0), -1)
+    cv2.putText(img, f"{label}   {stamp}", (14, 31), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (80, 80, 255), 2, cv2.LINE_AA)
+    name = time.strftime("%Y%m%d-%H%M%S") + ".jpg"
+    cv2.imwrite(str(INTRUDER_DIR / name), img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    for old in sorted(INTRUDER_DIR.glob("*.jpg"))[:-MAX_INTRUDER_PHOTOS]:
+        old.unlink()
+    print(f"[safe] intruder photo saved: {name}", flush=True)
 
 
 policy = LockPolicy(SETTINGS, on_event=on_event)
@@ -216,12 +272,42 @@ def api_button():                       # the page's "Start" button works like D
     return {"ok": True}
 
 
+def api_button_hold():                  # the page's "Change code" button = holding D7 for 3 s
+    button_held()
+    return {"ok": True}
+
+
+# ---- intruder photos ----
+PHOTO_NAME = re.compile(r"^\d{8}-\d{6}\.jpg$")
+
+
+def api_intruders():
+    if not INTRUDER_DIR.exists():
+        return {"photos": []}
+    return {"photos": [p.name for p in sorted(INTRUDER_DIR.glob("*.jpg"), reverse=True)]}
+
+
+def api_intruder(name: str):
+    from fastapi import Response
+    p = INTRUDER_DIR / name
+    if not PHOTO_NAME.match(name) or not p.exists():
+        return Response(status_code=404)
+    return Response(content=p.read_bytes(), media_type="image/jpeg")
+
+
+def api_intruders_clear():
+    n = 0
+    for p in INTRUDER_DIR.glob("*.jpg") if INTRUDER_DIR.exists() else []:
+        p.unlink()
+        n += 1
+    return {"ok": True, "deleted": n}
+
+
 # ---------------------------------------------------------------------------
 # Collecting training photos THROUGH THE BOARD'S CAMERA (so training matches what it sees)
 # Saved to /app/data/<class>/ = ~/ArduinoApps/impenetrable-safe/data/ on the board,
 # same size and naming as the laptop control panel (224 x 128, <burst>_<frame>.png).
 # ---------------------------------------------------------------------------
-DATA_DIR = HERE.parent / "data"
 capture = {"busy": False, "last": [], "message": ""}
 
 
@@ -273,6 +359,10 @@ ui.expose_api("POST", "/api/undo", api_undo)
 ui.expose_api("GET", "/api/state", api_state)
 ui.expose_api("GET", "/api/snapshot", api_snapshot)
 ui.expose_api("POST", "/api/button", api_button)
+ui.expose_api("POST", "/api/button_hold", api_button_hold)
+ui.expose_api("GET", "/api/intruders", api_intruders)
+ui.expose_api("GET", "/api/intruder", api_intruder)
+ui.expose_api("POST", "/api/intruders/clear", api_intruders_clear)
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +376,11 @@ def loop():
 
     with presses_lock:
         n, presses["n"] = presses["n"], 0
+        held, presses["held"] = presses["held"], 0
     for _ in range(n):
         policy.press_button(t0)
+    for _ in range(held):
+        policy.hold_button(t0)
 
     probs = None
     frame = camera.read()
@@ -301,6 +394,13 @@ def loop():
     policy.update(probs, now)
     status = policy.status(now)
     send_to_sketch(status)
+
+    if intruder["pending"] and frame is not None:
+        try:
+            save_intruder_photo(frame, intruder["pending"])
+        except Exception as e:
+            print(f"[safe] couldn't save the intruder photo: {e}", flush=True)
+        intruder["pending"] = None
 
     jpeg = None
     if frame is not None and now - loop_state["last_jpeg"] > 0.4:     # small picture for the webpage
