@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mujoco
+import numpy as np
 import torch
 
 from mjlab.actuator import BuiltinPdActuatorCfg
@@ -51,10 +52,13 @@ if TYPE_CHECKING:
 _HERE = Path(__file__).resolve().parent
 ROBOT_XML = next(p for p in (_HERE / "onshape" / "robot.xml", _HERE.parent / "onshape" / "robot.xml") if p.exists())
 LEFT, RIGHT = "left_wheel", "right_wheel"       # joint names in robot.xml
-TARGET_SPEED = 0.5          # m/s the robot is rewarded for going forward
+TARGET_SPEED = 0.04         # m/s; the beam walker does about 0.04 m/s with both motors at 8 rad/s (drive.py)
 MAX_WHEEL_SPEED = 10.0      # rad/s; a policy output of 1.0 means this wheel speed
-WHEEL_KD = 0.05             # how hard the motor pushes toward the wheel speed it was told (N*m per rad/s)
-WHEEL_TORQUE_LIMIT = 0.3    # N*m
+WHEEL_KD = 0.5              # how hard the motor pushes toward the speed it was told (N*m per rad/s); LEGO motors hold
+                            # their own speed, so this is stiff
+WHEEL_TORQUE_LIMIT = 0.15   # N*m; roughly a LEGO motor's stall torque (replace with your motor's real number)
+JOINT_FRICTION = 0.01       # N*m; onshape-to-robot writes 0.1, which stalls a small LEGO motor below about 2 rad/s
+ALIVE_BONUS = 0.5           # reward per step for staying upright, so flipping over is never the best way to end a run
 START_YAW = 0.4             # rad; the robot starts pointing up to this far off +x
 MAX_OFF_LINE = 1.5          # m; the episode ends if the robot wanders this far from y = 0
 EPISODE_S = 10.0
@@ -67,17 +71,40 @@ def _get_spec() -> mujoco.MjSpec:
   spec = mujoco.MjSpec.from_file(str(ROBOT_XML))
   for actuator in list(spec.actuators):     # mjlab adds its own wheel motors (below)
     spec.delete(actuator)
-  chassis = spec.body("chassis")
+  chassis = spec.worldbody.first_body()     # the root part in Onshape (here "double_motor")
+  # Onshape puts the body's origin wherever the CAD origin was (about 10 cm to the side of this robot).
+  # Move it onto the chassis' centre of mass, so position, heading and "off the line" describe the robot itself.
+  shift = np.array(chassis.ipos, dtype=float)
+  shift[2] = 0.0
+  for g in chassis.geoms:
+    g.pos = np.array(g.pos) - shift
+  for b in chassis.bodies:
+    b.pos = np.array(b.pos) - shift
+  chassis.ipos = np.array(chassis.ipos) - shift
+  for j in spec.joints:
+    j.frictionloss = JOINT_FRICTION
   chassis.add_freejoint()                   # let the robot move around (same as drive.py)
-  for g in chassis.geoms:                   # only the wheels should grip; the chassis slides (same as drive.py)
+  for g in chassis.geoms:                   # only the legs/feet should grip; the chassis slides (same as drive.py)
     g.friction[0] = 0.01
   return spec
+
+
+def _start_height() -> float:
+  """Height that puts the robot's lowest point 1 cm above the floor (like drive.py), so any leg shape fits."""
+  model = _get_spec().compile()
+  data = mujoco.MjData(model)
+  mujoco.mj_forward(model, data)
+  parts = [g for g in range(model.ngeom) if model.geom_bodyid[g] != 0]
+  return float(0.01 - min(data.geom_xpos[g, 2] - model.geom_rbound[g] for g in parts))
+
+
+CHASSIS = _get_spec().worldbody.first_body().name
 
 
 def _robot_cfg() -> EntityCfg:
   return EntityCfg(
     spec_fn=_get_spec,
-    init_state=EntityCfg.InitialStateCfg(pos=(0.0, 0.0, 0.06), joint_vel={".*": 0.0}),
+    init_state=EntityCfg.InitialStateCfg(pos=(0.0, 0.0, _start_height()), joint_vel={".*": 0.0}),
     articulation=EntityArticulationInfoCfg(
       actuators=(
         # stiffness 0 = no position target, so the motor only chases the velocity we ask for
@@ -126,6 +153,12 @@ def face_forward(env: ManagerBasedRlEnv) -> torch.Tensor:
   return -torch.square(_yaw(env))
 
 
+def alive(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """1 every step the run is still going. The other terms are mostly penalties, so without this, tipping over
+  (which ends the run early) would score better than walking. The beams are long enough to flip this robot."""
+  return torch.ones_like(_yaw(env))
+
+
 def too_far_off_line(env: ManagerBasedRlEnv) -> torch.Tensor:
   return _off_line(env).abs() > MAX_OFF_LINE
 
@@ -165,6 +198,7 @@ def drive_straight_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "stay_on_line": RewardTermCfg(func=stay_on_line, weight=1.0),
     "face_forward": RewardTermCfg(func=face_forward, weight=0.5),
     "action_rate": RewardTermCfg(func=action_rate_l2, weight=-0.05),
+    "alive": RewardTermCfg(func=alive, weight=ALIVE_BONUS),
   }
 
   terminations = {
@@ -188,7 +222,7 @@ def drive_straight_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     viewer=ViewerConfig(
       origin_type=ViewerConfig.OriginType.ASSET_BODY,
       entity_name="robot",
-      body_name="chassis",
+      body_name=CHASSIS,
       distance=1.2,
       elevation=-25.0,
       azimuth=140.0,
